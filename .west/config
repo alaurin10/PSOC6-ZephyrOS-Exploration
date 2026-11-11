@@ -1,9 +1,0 @@
-[manifest]
-path = ifx-zephyr-sdk
-file = west.yml
-
-[zephyr]
-base = ifx-zephyr
-
-[build]
-cmake-args = -DOPENOCD=/Users/andrewlaurin/Documents/Repositories/openocd/bin/openocd

@@ -1,6 +1,0 @@
-{
-    "terminal.integrated.defaultProfile.osx": "Zephyr IDE Terminal",
-    "C_Cpp.default.compileCommands": "${workspaceFolder}/.vscode/compile_commands.json",
-    "cmake.sourceDirectory": "/Users/andrewlaurin/Documents/Repositories/PSOC6-Exploration/ifx-zephyr",
-    "cmake.configureOnOpen": false
-}
