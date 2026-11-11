@@ -1,0 +1,12 @@
+{
+    "cmake.sourceDirectory": "C:/Users/laurin/Projects/Repositories/PSOC6-Exploration/ifx-zephyr",
+    "terminal.integrated.defaultProfile.windows": "Zephyr IDE Terminal",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/.vscode",
+        "--background-index",
+        "--completion-style=detailed",
+        "--header-insertion=never",
+        "--query-driver=C:/Users/laurin/**/*"
+    ],
+    "cmake.configureOnOpen": false
+}
