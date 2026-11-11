@@ -1,17 +1,14 @@
 /*
  * RTOS blinky for the CY8CPROTO-062-4343W.
  *
- * - blink thread:  owns LED0 and the blink period. Waits on a message queue
- *                  with the period as timeout: timeout -> toggle the LED,
- *                  message -> adopt the new period.
- * - button thread: woken by the SW0 interrupt via a semaphore; sends the
- *                  next preset period to the message queue.
- * - shell:         "blink set <ms>" sends any period to the same queue.
- * - watchdog:      fed by the blink thread on every loop, so a stuck or
- *                  suspended blink thread resets the chip.
- * - thermistor:    sampled periodically on the system work queue (thermistor.c).
- * - settings:      blink period and temperature thresholds persist in flash
- *                  (app_settings.c).
+ * Modules:
+ * - led_ctrl.c:     LED state machine (SMF): temperature modes / manual mode.
+ * - thermistor.c:   samples RT1 once per second (hardware counter) and
+ *                   publishes on the zbus temp_chan.
+ * - temp_monitor.c: zbus observers for logging and min/max/avg statistics.
+ * - app_settings.c: blink period and thresholds persisted in flash.
+ * - app_watchdog.c: hardware watchdog, fed by the LED thread.
+ * - main.c (here):  startup, SW0 button thread and the "blink" shell command.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,51 +16,28 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/watchdog.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
-#include <cmsis_core.h>
-#include <cy_syslib.h>
 
 #include "app_settings.h"
+#include "app_watchdog.h"
+#include "led_ctrl.h"
 #include "thermistor.h"
 
 LOG_MODULE_REGISTER(rtos_blinky, LOG_LEVEL_INF);
 
 /* Pins come from the board devicetree aliases, not hard-coded port/pin numbers. */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 
-#define BLINK_PRIORITY  7
 #define BUTTON_PRIORITY 5 /* lower number = higher priority */
 #define STACK_SIZE      1024
 #define DEBOUNCE_MS     50
-#define WDT_TIMEOUT_MS  4000
-
-BUILD_ASSERT(APP_PERIOD_MAX_MS * 2 <= WDT_TIMEOUT_MS, "blink period too close to watchdog timeout");
 
 static const uint32_t preset_periods_ms[] = {500, 250, 100, 1000};
-
-static const struct device *const wdt = DEVICE_DT_GET(DT_ALIAS(watchdog0));
-static int wdt_channel = -1; /* -1: watchdog not running */
-
-/*
- * Queue of requested blink periods: each message is one uint32_t (ms),
- * up to 4 can be pending, buffer aligned to 4 bytes. The queue copies the
- * data in and out, so producers and the consumer never share memory.
- */
-K_MSGQ_DEFINE(period_msgq, sizeof(uint32_t), 4, 4);
 
 /* Binary semaphore (max count 1) used to signal "button pressed" from ISR to thread. */
 static K_SEM_DEFINE(button_sem, 0, 1);
 static struct gpio_callback button_cb_data;
-
-/* Producer side, used by both the button thread and the shell thread. */
-static int request_period(uint32_t period_ms)
-{
-	/* K_NO_WAIT: never block the caller; returns -ENOMSG if the queue is full. */
-	return k_msgq_put(&period_msgq, &period_ms, K_NO_WAIT);
-}
 
 static void button_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -73,38 +47,6 @@ static void button_isr(const struct device *dev, struct gpio_callback *cb, uint3
 
 	/* Keep ISRs short: just wake the thread that does the real work. */
 	k_sem_give(&button_sem);
-}
-
-static void blink_thread(void *p1, void *p2, void *p3)
-{
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
-
-	uint32_t period_ms = app_settings_period_ms();
-	uint32_t new_period_ms;
-
-	while (true) {
-		/* Proof of life: if this loop stops running, the chip resets. */
-		if (wdt_channel >= 0) {
-			wdt_feed(wdt, wdt_channel);
-		}
-
-		/*
-		 * Block until a message arrives OR one blink period passes. This
-		 * replaces k_msleep(): the thread still sleeps, but a new period
-		 * takes effect immediately instead of after the current wait.
-		 */
-		if (k_msgq_get(&period_msgq, &new_period_ms, K_MSEC(period_ms)) == 0) {
-			period_ms = new_period_ms;
-			LOG_INF("Blink period now %u ms", period_ms);
-			/* Persist it; the actual flash write happens later on the work queue. */
-			app_settings_set_period_ms(period_ms);
-		} else {
-			/* -EAGAIN: timed out with no message, time to toggle. */
-			gpio_pin_toggle_dt(&led);
-		}
-	}
 }
 
 static void button_thread(void *p1, void *p2, void *p3)
@@ -123,8 +65,8 @@ static void button_thread(void *p1, void *p2, void *p3)
 		if (gpio_pin_get_dt(&button) == 1) {
 			idx = (idx + 1) % ARRAY_SIZE(preset_periods_ms);
 			LOG_INF("Button pressed -> requesting %u ms", preset_periods_ms[idx]);
-			if (request_period(preset_periods_ms[idx]) != 0) {
-				LOG_WRN("Period queue full, press ignored");
+			if (led_ctrl_request_period(preset_periods_ms[idx]) != 0) {
+				LOG_WRN("LED event queue full, press ignored");
 			}
 		}
 
@@ -132,6 +74,10 @@ static void button_thread(void *p1, void *p2, void *p3)
 		k_sem_reset(&button_sem);
 	}
 }
+
+/* Created but not started (SYS_FOREVER_MS); main() starts it once the GPIO is set up. */
+K_THREAD_DEFINE(button_tid, STACK_SIZE, button_thread, NULL, NULL, NULL,
+		BUTTON_PRIORITY, 0, SYS_FOREVER_MS);
 
 /* Shell handler: runs in the shell's own thread when "blink set <ms>" is entered. */
 static int cmd_blink_set(const struct shell *sh, size_t argc, char **argv)
@@ -147,8 +93,8 @@ static int cmd_blink_set(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	if (request_period((uint32_t)period_ms) != 0) {
-		shell_error(sh, "Period queue full, try again");
+	if (led_ctrl_request_period((uint32_t)period_ms) != 0) {
+		shell_error(sh, "LED event queue full, try again");
 		return -EBUSY;
 	}
 
@@ -160,72 +106,29 @@ static int cmd_blink_set(const struct shell *sh, size_t argc, char **argv)
  * SHELL_CMD_ARG(..., 2, 0): 2 mandatory args (the "set" token + <ms>), 0 optional.
  */
 SHELL_STATIC_SUBCMD_SET_CREATE(blink_cmds,
-	SHELL_CMD_ARG(set, NULL, "Set the blink period: blink set <ms>", cmd_blink_set, 2, 0),
+	SHELL_CMD_ARG(set, NULL, "Set the user blink period: blink set <ms>", cmd_blink_set, 2, 0),
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(blink, &blink_cmds, "Control the LED blink rate", NULL);
 
-/*
- * Statically defined threads. The delay of SYS_FOREVER_MS means "created but
- * not started"; main() starts them once the GPIOs are configured.
- */
-K_THREAD_DEFINE(blink_tid, STACK_SIZE, blink_thread, NULL, NULL, NULL,
-		BLINK_PRIORITY, 0, SYS_FOREVER_MS);
-K_THREAD_DEFINE(button_tid, STACK_SIZE, button_thread, NULL, NULL, NULL,
-		BUTTON_PRIORITY, 0, SYS_FOREVER_MS);
-
-static void report_reset_cause(void)
+static int button_init(void)
 {
-	/* Zephyr's hwinfo reset-cause API isn't implemented for PSoC 6 in this tree,
-	 * so read the SRSS reset-cause register through the Infineon PDL directly.
-	 */
-	uint32_t reason = Cy_SysLib_GetResetReason();
-
-	if (reason & CY_SYSLIB_RESET_HWWDT) {
-		LOG_WRN("Last reset was caused by the WATCHDOG");
-	} else {
-		LOG_INF("Reset cause: 0x%08x", reason);
-	}
-	/* Clear it so the next boot reports its own cause, not this one. */
-	Cy_SysLib_ClearResetReason();
-}
-
-static void watchdog_start(void)
-{
-	/* The PSoC 6 WDT keeps counting while the CPU is halted at a breakpoint,
-	 * so leave it off while debug is enabled (DHCSR.C_DEBUGEN). Only the
-	 * debugger can set this bit and software can't clear it; a soft reset
-	 * (e.g. after flashing) keeps it, an XRES (RESET button) or power cycle clears it.
-	 */
-	if (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) {
-		LOG_WRN("Debug enabled: watchdog not started. Press RESET (SW1) to arm it.");
-		return;
+	if (!gpio_is_ready_dt(&button)) {
+		return -ENODEV;
 	}
 
-	if (!device_is_ready(wdt)) {
-		LOG_ERR("Watchdog device not ready");
-		return;
+	int ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
+
+	if (ret == 0) {
+		ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
 	}
-
-	const struct wdt_timeout_cfg cfg = {
-		.window.max = WDT_TIMEOUT_MS,
-		.flags = WDT_FLAG_RESET_SOC,
-	};
-	int channel = wdt_install_timeout(wdt, &cfg);
-
-	if (channel < 0) {
-		LOG_ERR("Watchdog install failed (%d)", channel);
-		return;
+	if (ret == 0) {
+		gpio_init_callback(&button_cb_data, button_isr, BIT(button.pin));
+		ret = gpio_add_callback(button.port, &button_cb_data);
 	}
-
-	int ret = wdt_setup(wdt, 0);
-
-	if (ret < 0) {
-		LOG_ERR("Watchdog setup failed (%d)", ret);
-		return;
+	if (ret == 0) {
+		k_thread_start(button_tid);
 	}
-
-	wdt_channel = channel;
-	LOG_INF("Watchdog started (%d ms timeout)", WDT_TIMEOUT_MS);
+	return ret;
 }
 
 int main(void)
@@ -233,7 +136,7 @@ int main(void)
 	int ret;
 
 	LOG_INF("RTOS blinky on %s", CONFIG_BOARD);
-	report_reset_cause();
+	app_watchdog_report_reset_cause();
 
 	/* Load saved settings before starting the threads that use them. */
 	ret = app_settings_init();
@@ -241,43 +144,24 @@ int main(void)
 		LOG_ERR("Settings unavailable (%d), using defaults", ret);
 	}
 
-	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
-		LOG_ERR("GPIO device not ready");
-		return 0;
-	}
-
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure LED (%d)", ret);
-		return 0;
-	}
-
-	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure button (%d)", ret);
-		return 0;
-	}
-
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure button interrupt (%d)", ret);
-		return 0;
-	}
-
-	gpio_init_callback(&button_cb_data, button_isr, BIT(button.pin));
-	gpio_add_callback(button.port, &button_cb_data);
-
 	/* Start the watchdog just before the thread that feeds it. */
-	watchdog_start();
-	k_thread_start(blink_tid);
-	k_thread_start(button_tid);
+	app_watchdog_start();
+	ret = led_ctrl_start();
+	if (ret < 0) {
+		LOG_ERR("LED controller failed (%d)", ret);
+	}
+
+	ret = button_init();
+	if (ret < 0) {
+		LOG_ERR("Button setup failed (%d)", ret);
+	}
 
 	ret = thermistor_init();
 	if (ret < 0) {
 		LOG_ERR("Thermistor init failed (%d)", ret);
 	}
 
-	LOG_INF("Threads started. Press SW0 or try 'blink set <ms>' and 'temp'.");
+	LOG_INF("Started. Try 'led', 'led mode manual', 'blink set <ms>', 'temp'.");
 
 	/* Returning from main() just ends the main thread; the others keep running. */
 	return 0;
