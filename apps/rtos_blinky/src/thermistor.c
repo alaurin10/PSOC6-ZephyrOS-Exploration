@@ -10,6 +10,10 @@
  * The supply voltage and the ADC reference/full-scale cancel out, so neither
  * needs to be known exactly.
  *
+ * Timing: a hardware TCPWM counter wraps once per second; its interrupt
+ * submits the sample work item. The ADC read itself can't run in the ISR
+ * because adc_read() blocks.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,9 +22,11 @@
 #include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/atomic.h>
 
 #include "app_settings.h"
 #include "thermistor.h"
@@ -32,6 +38,8 @@ LOG_MODULE_REGISTER(thermistor, LOG_LEVEL_INF);
 static const struct adc_dt_spec therm_adc = ADC_DT_SPEC_GET(USER_NODE);
 static const struct gpio_dt_spec res_end = GPIO_DT_SPEC_GET(USER_NODE, therm_res_gpios);
 static const struct gpio_dt_spec ntc_end = GPIO_DT_SPEC_GET(USER_NODE, therm_ntc_gpios);
+static const struct device *const sample_counter =
+	DEVICE_DT_GET(DT_PHANDLE(USER_NODE, sample_counter));
 
 /* R39 and RT1 (Murata NCP18XH103F03RB: 10k at 25 C, B25/50 = 3380 K) */
 #define R_FIXED_OHM      10000.0f
@@ -50,6 +58,8 @@ struct reading {
 	uint16_t raw_a;
 	uint16_t raw_b;
 	int64_t timestamp_ms;
+	/* Time from the counter interrupt until this sample started (-1: not timer-triggered). */
+	int32_t latency_us;
 };
 
 /* The work item writes `latest`, the shell thread reads it: protect with a mutex. */
@@ -58,7 +68,25 @@ static struct reading latest;
 static bool have_reading;
 
 static void sample_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(sample_work, sample_work_handler);
+static K_WORK_DEFINE(sample_work, sample_work_handler);
+
+/* Set by the ISR so the work handler knows the counter was just reset to 0. */
+static atomic_t timer_fired;
+static atomic_t timer_ticks;
+
+/*
+ * Counter "top value" callback: runs in interrupt context every time the
+ * counter wraps (once per SAMPLE_PERIOD_MS). Keep it tiny: hand off to a thread.
+ */
+static void sample_tick_isr(const struct device *dev, void *user_data)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(user_data);
+
+	atomic_inc(&timer_ticks);
+	atomic_set(&timer_fired, 1);
+	k_work_submit(&sample_work);
+}
 
 static int read_raw(uint16_t *raw)
 {
@@ -117,13 +145,28 @@ static int measure(struct reading *r)
 /* Runs on the system work queue thread, not in its own thread. */
 static void sample_work_handler(struct k_work *work)
 {
+	ARG_UNUSED(work);
 	static int32_t last_logged_centi_c = INT32_MIN;
+	int32_t latency_us = -1;
 	struct reading r;
+
+	/* The counter restarted from 0 at the interrupt, so its current value is
+	 * exactly how long the work item waited to run.
+	 */
+	if (atomic_cas(&timer_fired, 1, 0)) {
+		uint32_t ticks;
+
+		if (counter_get_value(sample_counter, &ticks) == 0) {
+			latency_us = (int32_t)counter_ticks_to_us(sample_counter, ticks);
+		}
+	}
+
 	int err = measure(&r);
 
 	if (err != 0) {
 		LOG_WRN("Measurement failed (%d)", err);
 	} else {
+		r.latency_us = latency_us;
 		k_mutex_lock(&latest_lock, K_FOREVER);
 		latest = r;
 		have_reading = true;
@@ -136,9 +179,38 @@ static void sample_work_handler(struct k_work *work)
 				abs(r.centi_c) / 100, abs(r.centi_c) % 100);
 		}
 	}
+}
 
-	/* Re-arm: this is what makes a one-shot work item periodic. */
-	k_work_schedule(k_work_delayable_from_work(work), K_MSEC(SAMPLE_PERIOD_MS));
+static int sample_timer_start(void)
+{
+	if (!device_is_ready(sample_counter)) {
+		LOG_ERR("Sample counter not ready");
+		return -ENODEV;
+	}
+
+	/* The counter counts 0..top inclusive, so one period is top + 1 ticks. */
+	const struct counter_top_cfg top_cfg = {
+		.ticks = counter_us_to_ticks(sample_counter, SAMPLE_PERIOD_MS * 1000U) - 1U,
+		.callback = sample_tick_isr,
+		.user_data = NULL,
+		.flags = 0,
+	};
+	int err = counter_set_top_value(sample_counter, &top_cfg);
+
+	if (err != 0) {
+		LOG_ERR("Counter top value failed (%d)", err);
+		return err;
+	}
+
+	err = counter_start(sample_counter);
+	if (err != 0) {
+		LOG_ERR("Counter start failed (%d)", err);
+		return err;
+	}
+
+	LOG_INF("Sample timer: %u Hz counter, top %u", counter_get_frequency(sample_counter),
+		top_cfg.ticks);
+	return 0;
 }
 
 int thermistor_init(void)
@@ -166,8 +238,9 @@ int thermistor_init(void)
 		return err;
 	}
 
-	k_work_schedule(&sample_work, K_NO_WAIT);
-	return 0;
+	/* First reading right away, then one per counter wrap. */
+	k_work_submit(&sample_work);
+	return sample_timer_start();
 }
 
 static int cmd_temp(const struct shell *sh, size_t argc, char **argv)
@@ -192,6 +265,10 @@ static int cmd_temp(const struct shell *sh, size_t argc, char **argv)
 		    abs(r.centi_c) / 100, abs(r.centi_c) % 100);
 	shell_print(sh, "NTC: %u ohm (raw A=%u, B=%u), %lld ms ago", r.ntc_ohm, r.raw_a,
 		    r.raw_b, k_uptime_get() - r.timestamp_ms);
+	if (r.latency_us >= 0) {
+		shell_print(sh, "Timer IRQ -> sample latency: %d us (timer ticks: %d)",
+			    r.latency_us, (int)atomic_get(&timer_ticks));
+	}
 	return 0;
 }
 

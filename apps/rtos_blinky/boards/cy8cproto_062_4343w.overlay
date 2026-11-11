@@ -27,7 +27,16 @@
 		io-channels = <&adc0 1>;
 		therm-res-gpios = <&gpio_prt10 0 GPIO_ACTIVE_HIGH>;
 		therm-ntc-gpios = <&gpio_prt10 3 GPIO_ACTIVE_HIGH>;
+		/* Hardware timer that paces thermistor sampling. */
+		sample-counter = <&counter0_0>;
 	};
+};
+
+/* TCPWM0 counter 0 (already enabled by the board): tick at 1 MHz so one
+ * tick = 1 us. 32 bits at 1 MHz wraps after ~71 minutes, plenty for 1 s.
+ */
+&counter0_0 {
+	clock-frequency = <1000000>;
 };
 
 /*
