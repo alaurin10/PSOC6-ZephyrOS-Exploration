@@ -7,4 +7,3 @@ base = ifx-zephyr
 
 [build]
 cmake-args = -DOPENOCD=/Users/andrewlaurin/Documents/Repositories/openocd/bin/openocd
-

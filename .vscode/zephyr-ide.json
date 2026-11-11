@@ -1,3 +1,79 @@
 {
-  "projects": {}
+  "projects": {
+    "blinky": {
+      "relPath": "ifx-zephyr/samples/basic/blinky",
+      "name": "blinky",
+      "buildConfigs": {
+        "build/cy8cproto_062_4343w/cy8c624abzi_s2d44": {
+          "relBoardSubDir": "infineon/cy8cproto_062_4343w",
+          "board": "cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "name": "build/cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "compilerOptimization": "speed",
+          "westBuildArgs": [],
+          "westBuildCMakeArgs": [
+            "-DCONFIG_SPEED_OPTIMIZATIONS=y"
+          ],
+          "confFiles": {
+            "config": [],
+            "overlay": []
+          }
+        }
+      },
+      "twisterConfigs": {},
+      "confFiles": {
+        "config": [],
+        "overlay": []
+      }
+    },
+    "hello_world": {
+      "relPath": "ifx-zephyr/samples/hello_world",
+      "name": "hello_world",
+      "buildConfigs": {
+        "build/cy8cproto_062_4343w/cy8c624abzi_s2d44": {
+          "relBoardSubDir": "infineon/cy8cproto_062_4343w",
+          "board": "cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "name": "build/cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "compilerOptimization": "speed",
+          "westBuildArgs": [],
+          "westBuildCMakeArgs": [
+            "-DCONFIG_SPEED_OPTIMIZATIONS=y"
+          ],
+          "confFiles": {
+            "config": [],
+            "overlay": []
+          }
+        }
+      },
+      "twisterConfigs": {},
+      "confFiles": {
+        "config": [],
+        "overlay": []
+      }
+    },
+    "capsense_test": {
+      "relPath": "apps/capsense_test",
+      "name": "capsense_test",
+      "buildConfigs": {
+        "build/cy8cproto_062_4343w/cy8c624abzi_s2d44": {
+          "relBoardSubDir": "infineon/cy8cproto_062_4343w",
+          "board": "cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "name": "build/cy8cproto_062_4343w/cy8c624abzi_s2d44",
+          "compilerOptimization": "speed",
+          "westBuildArgs": [],
+          "westBuildCMakeArgs": [
+            "-DCONFIG_SPEED_OPTIMIZATIONS=y"
+          ],
+          "confFiles": {
+            "config": [],
+            "overlay": []
+          }
+        }
+      },
+      "twisterConfigs": {},
+      "confFiles": {
+        "config": [],
+        "overlay": []
+      }
+    }
+  }
 }
