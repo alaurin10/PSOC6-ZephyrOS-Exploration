@@ -8,10 +8,10 @@
           "relBoardSubDir": "infineon/cy8cproto_062_4343w",
           "board": "cy8cproto_062_4343w/cy8c624abzi_s2d44",
           "name": "build/cy8cproto_062_4343w/cy8c624abzi_s2d44",
-          "compilerOptimization": "speed",
+          "compilerOptimization": "debug",
           "westBuildArgs": [],
           "westBuildCMakeArgs": [
-            "-DCONFIG_SPEED_OPTIMIZATIONS=y"
+            "-DCONFIG_DEBUG_OPTIMIZATIONS=y"
           ],
           "confFiles": {
             "config": [],

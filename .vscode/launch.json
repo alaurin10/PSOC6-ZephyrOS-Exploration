@@ -1,0 +1,61 @@
+{
+    // Cortex-Debug configurations for the CY8CPROTO-062-4343W (PSoC 6, dual core).
+    // Zephyr runs on the Cortex-M4. OpenOCD opens one GDB port per core
+    // (CM0+ first, CM4 second), so "targetProcessor": 1 selects the CM4.
+    // Build first (Zephyr IDE "Build"), then press F5.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "rtos_blinky: Debug (CM4)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/apps/rtos_blinky/build/cy8cproto_062_4343w/cy8c624abzi_s2d44/zephyr/zephyr.elf",
+            "gdbPath": "${env:ZEPHYR_SDK_INSTALL_DIR}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "servertype": "openocd",
+            "serverpath": "C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/bin/openocd.exe",
+            "searchDir": ["C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/scripts"],
+            "configFiles": ["${workspaceFolder}/ifx-zephyr/boards/infineon/cy8cproto_062_4343w/support/openocd.cfg"],
+            "numberOfProcessors": 2,
+            "targetProcessor": 1,
+            // Zephyr thread awareness on the CM4 (needs CONFIG_DEBUG_THREAD_INFO=y).
+            "openOCDLaunchCommands": ["psoc6.cpu.cm4 configure -rtos Zephyr"],
+            "svdFile": "${workspaceFolder}/modules/hal/infineon/mtb-pdl-cat1/devices/COMPONENT_CAT1A/svd/psoc6_02.svd",
+            // The CM0+ boots first and enables the CM4, so a plain "reset halt" would
+            // freeze the CM0+ and the CM4 would never start. Instead: flash, let both
+            // cores run, then reset again and halt the CM4 at its own reset handler.
+            "overrideLaunchCommands": [
+                "monitor reset init",
+                "load",
+                "monitor reset run",
+                "monitor sleep 200",
+                "monitor psoc6 reset_halt sysresetreq"
+            ],
+            "overrideRestartCommands": [
+                "monitor reset run",
+                "monitor sleep 200",
+                "monitor psoc6 reset_halt sysresetreq"
+            ],
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none"
+        },
+        {
+            // Attach to the already-running firmware without flashing or resetting.
+            "name": "rtos_blinky: Attach (CM4)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/apps/rtos_blinky/build/cy8cproto_062_4343w/cy8c624abzi_s2d44/zephyr/zephyr.elf",
+            "gdbPath": "${env:ZEPHYR_SDK_INSTALL_DIR}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "servertype": "openocd",
+            "serverpath": "C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/bin/openocd.exe",
+            "searchDir": ["C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/scripts"],
+            "configFiles": ["${workspaceFolder}/ifx-zephyr/boards/infineon/cy8cproto_062_4343w/support/openocd.cfg"],
+            "numberOfProcessors": 2,
+            "targetProcessor": 1,
+            "openOCDLaunchCommands": ["psoc6.cpu.cm4 configure -rtos Zephyr"],
+            "svdFile": "${workspaceFolder}/modules/hal/infineon/mtb-pdl-cat1/devices/COMPONENT_CAT1A/svd/psoc6_02.svd",
+            "showDevDebugOutput": "none"
+        }
+    ]
+}
