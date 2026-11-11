@@ -10,4 +10,5 @@ project(rtos_blinky)
 target_sources(app PRIVATE
   src/main.c
   src/thermistor.c
+  src/app_settings.c
 )

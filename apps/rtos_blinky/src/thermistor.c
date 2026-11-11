@@ -22,6 +22,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 
+#include "app_settings.h"
 #include "thermistor.h"
 
 LOG_MODULE_REGISTER(thermistor, LOG_LEVEL_INF);
@@ -194,4 +195,35 @@ static int cmd_temp(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(temp, NULL, "Show the latest thermistor reading", cmd_temp);
+/* "temp limits" shows, "temp limits <cold> <hot>" sets (whole degrees C, saved to flash). */
+static int cmd_temp_limits(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 3) {
+		int err = 0;
+		long cold = shell_strtol(argv[1], 10, &err);
+		long hot = err == 0 ? shell_strtol(argv[2], 10, &err) : 0;
+
+		if (err != 0 || app_settings_set_thresholds_centi(cold * 100, hot * 100) != 0) {
+			shell_error(sh, "Need -20 <= cold, hot <= 80 and hot >= cold + 2");
+			return -EINVAL;
+		}
+	} else if (argc != 1) {
+		shell_error(sh, "Usage: temp limits [<cold> <hot>]");
+		return -EINVAL;
+	}
+
+	int32_t cold = app_settings_cold_centi();
+	int32_t hot = app_settings_hot_centi();
+
+	shell_print(sh, "Cold below %d.%02d C, hot at or above %d.%02d C", cold / 100,
+		    abs(cold) % 100, hot / 100, abs(hot) % 100);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(temp_cmds,
+	SHELL_CMD_ARG(limits, NULL, "Show/set LED-mode thresholds: temp limits [<cold> <hot>]",
+		      cmd_temp_limits, 1, 2),
+	SHELL_SUBCMD_SET_END);
+
+/* "temp" on its own runs cmd_temp; "temp limits ..." runs the subcommand. */
+SHELL_CMD_REGISTER(temp, &temp_cmds, "Show the latest thermistor reading", cmd_temp);

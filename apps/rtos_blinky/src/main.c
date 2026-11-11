@@ -10,6 +10,8 @@
  * - watchdog:      fed by the blink thread on every loop, so a stuck or
  *                  suspended blink thread resets the chip.
  * - thermistor:    sampled periodically on the system work queue (thermistor.c).
+ * - settings:      blink period and temperature thresholds persist in flash
+ *                  (app_settings.c).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,6 +25,7 @@
 #include <cmsis_core.h>
 #include <cy_syslib.h>
 
+#include "app_settings.h"
 #include "thermistor.h"
 
 LOG_MODULE_REGISTER(rtos_blinky, LOG_LEVEL_INF);
@@ -35,14 +38,9 @@ static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
 #define BUTTON_PRIORITY 5 /* lower number = higher priority */
 #define STACK_SIZE      1024
 #define DEBOUNCE_MS     50
-#define PERIOD_MIN_MS   10
-/* The blink thread feeds the watchdog once per loop, so its longest wait
- * (one blink period) must stay well below the watchdog timeout.
- */
-#define PERIOD_MAX_MS   2000
 #define WDT_TIMEOUT_MS  4000
 
-BUILD_ASSERT(PERIOD_MAX_MS * 2 <= WDT_TIMEOUT_MS, "blink period too close to watchdog timeout");
+BUILD_ASSERT(APP_PERIOD_MAX_MS * 2 <= WDT_TIMEOUT_MS, "blink period too close to watchdog timeout");
 
 static const uint32_t preset_periods_ms[] = {500, 250, 100, 1000};
 
@@ -83,7 +81,7 @@ static void blink_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	uint32_t period_ms = preset_periods_ms[0];
+	uint32_t period_ms = app_settings_period_ms();
 	uint32_t new_period_ms;
 
 	while (true) {
@@ -100,6 +98,8 @@ static void blink_thread(void *p1, void *p2, void *p3)
 		if (k_msgq_get(&period_msgq, &new_period_ms, K_MSEC(period_ms)) == 0) {
 			period_ms = new_period_ms;
 			LOG_INF("Blink period now %u ms", period_ms);
+			/* Persist it; the actual flash write happens later on the work queue. */
+			app_settings_set_period_ms(period_ms);
 		} else {
 			/* -EAGAIN: timed out with no message, time to toggle. */
 			gpio_pin_toggle_dt(&led);
@@ -141,9 +141,9 @@ static int cmd_blink_set(const struct shell *sh, size_t argc, char **argv)
 	int err = 0;
 	unsigned long period_ms = shell_strtoul(argv[1], 10, &err);
 
-	if (err != 0 || period_ms < PERIOD_MIN_MS || period_ms > PERIOD_MAX_MS) {
+	if (err != 0 || period_ms < APP_PERIOD_MIN_MS || period_ms > APP_PERIOD_MAX_MS) {
 		shell_error(sh, "Period must be a number from %d to %d (ms)",
-			    PERIOD_MIN_MS, PERIOD_MAX_MS);
+			    APP_PERIOD_MIN_MS, APP_PERIOD_MAX_MS);
 		return -EINVAL;
 	}
 
@@ -234,6 +234,12 @@ int main(void)
 
 	LOG_INF("RTOS blinky on %s", CONFIG_BOARD);
 	report_reset_cause();
+
+	/* Load saved settings before starting the threads that use them. */
+	ret = app_settings_init();
+	if (ret < 0) {
+		LOG_ERR("Settings unavailable (%d), using defaults", ret);
+	}
 
 	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
 		LOG_ERR("GPIO device not ready");
