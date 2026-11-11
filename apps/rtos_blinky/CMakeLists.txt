@@ -11,4 +11,6 @@ target_sources(app PRIVATE
   src/main.c
   src/thermistor.c
   src/app_settings.c
+  src/channels.c
+  src/temp_monitor.c
 )

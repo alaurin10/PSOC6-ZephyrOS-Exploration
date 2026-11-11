@@ -29,6 +29,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "app_settings.h"
+#include "channels.h"
 #include "thermistor.h"
 
 LOG_MODULE_REGISTER(thermistor, LOG_LEVEL_INF);
@@ -50,22 +51,6 @@ static const struct device *const sample_counter =
 
 #define SAMPLE_PERIOD_MS 1000
 #define SETTLE_US        50
-#define LOG_DELTA_CENTI  50 /* log when the temperature moves by 0.5 C or more */
-
-struct reading {
-	int32_t centi_c;
-	uint32_t ntc_ohm;
-	uint16_t raw_a;
-	uint16_t raw_b;
-	int64_t timestamp_ms;
-	/* Time from the counter interrupt until this sample started (-1: not timer-triggered). */
-	int32_t latency_us;
-};
-
-/* The work item writes `latest`, the shell thread reads it: protect with a mutex. */
-static K_MUTEX_DEFINE(latest_lock);
-static struct reading latest;
-static bool have_reading;
 
 static void sample_work_handler(struct k_work *work);
 static K_WORK_DEFINE(sample_work, sample_work_handler);
@@ -110,7 +95,7 @@ static int sample_with_polarity(bool res_high, uint16_t *raw)
 	return read_raw(raw);
 }
 
-static int measure(struct reading *r)
+static int measure(struct temp_msg *r)
 {
 	const uint16_t raw_max = BIT(therm_adc.resolution) - 1;
 	int err = sample_with_polarity(true, &r->raw_a);
@@ -146,9 +131,9 @@ static int measure(struct reading *r)
 static void sample_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	static int32_t last_logged_centi_c = INT32_MIN;
+	static uint32_t seq;
 	int32_t latency_us = -1;
-	struct reading r;
+	struct temp_msg r;
 
 	/* The counter restarted from 0 at the interrupt, so its current value is
 	 * exactly how long the work item waited to run.
@@ -165,19 +150,20 @@ static void sample_work_handler(struct k_work *work)
 
 	if (err != 0) {
 		LOG_WRN("Measurement failed (%d)", err);
-	} else {
-		r.latency_us = latency_us;
-		k_mutex_lock(&latest_lock, K_FOREVER);
-		latest = r;
-		have_reading = true;
-		k_mutex_unlock(&latest_lock);
+		return;
+	}
 
-		if (last_logged_centi_c == INT32_MIN ||
-		    abs(r.centi_c - last_logged_centi_c) >= LOG_DELTA_CENTI) {
-			last_logged_centi_c = r.centi_c;
-			LOG_INF("Temperature %s%d.%02d C", r.centi_c < 0 ? "-" : "",
-				abs(r.centi_c) / 100, abs(r.centi_c) % 100);
-		}
+	r.seq = ++seq;
+	r.latency_us = latency_us;
+
+	/*
+	 * Copy the message into the channel and notify every observer. Listeners
+	 * run right here, in this thread; subscribers are woken up to run later.
+	 * The timeout bounds how long we wait if another thread holds the channel.
+	 */
+	err = zbus_chan_pub(&temp_chan, &r, K_MSEC(100));
+	if (err != 0) {
+		LOG_WRN("Publish failed (%d)", err); /* -ENOMSG: rejected by the validator */
 	}
 }
 
@@ -248,21 +234,17 @@ static int cmd_temp(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	struct reading r;
-	bool valid;
+	struct temp_msg r;
 
-	k_mutex_lock(&latest_lock, K_FOREVER);
-	r = latest;
-	valid = have_reading;
-	k_mutex_unlock(&latest_lock);
+	/* The channel always holds the latest message: read a consistent copy of it. */
+	int err = zbus_chan_read(&temp_chan, &r, K_MSEC(100));
 
-	if (!valid) {
+	if (err != 0 || r.seq == 0) {
 		shell_error(sh, "No reading yet");
 		return -EAGAIN;
 	}
 
-	shell_print(sh, "Temperature: %s%d.%02d C", r.centi_c < 0 ? "-" : "",
-		    abs(r.centi_c) / 100, abs(r.centi_c) % 100);
+	shell_print(sh, "Temperature: " CENTI_FMT " C (sample #%u)", CENTI_ARGS(r.centi_c), r.seq);
 	shell_print(sh, "NTC: %u ohm (raw A=%u, B=%u), %lld ms ago", r.ntc_ohm, r.raw_a,
 		    r.raw_b, k_uptime_get() - r.timestamp_ms);
 	if (r.latency_us >= 0) {
@@ -292,15 +274,19 @@ static int cmd_temp_limits(const struct shell *sh, size_t argc, char **argv)
 	int32_t cold = app_settings_cold_centi();
 	int32_t hot = app_settings_hot_centi();
 
-	shell_print(sh, "Cold below %d.%02d C, hot at or above %d.%02d C", cold / 100,
-		    abs(cold) % 100, hot / 100, abs(hot) % 100);
+	shell_print(sh, "Cold below " CENTI_FMT " C, hot at or above " CENTI_FMT " C",
+		    CENTI_ARGS(cold), CENTI_ARGS(hot));
 	return 0;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(temp_cmds,
-	SHELL_CMD_ARG(limits, NULL, "Show/set LED-mode thresholds: temp limits [<cold> <hot>]",
-		      cmd_temp_limits, 1, 2),
-	SHELL_SUBCMD_SET_END);
+/*
+ * Extensible subcommand set: any file can add "temp <something>" with
+ * SHELL_SUBCMD_ADD((temp), ...), e.g. "temp stats" lives in temp_monitor.c.
+ */
+SHELL_SUBCMD_SET_CREATE(temp_cmds, (temp));
+SHELL_SUBCMD_ADD((temp), limits, NULL,
+		 "Show/set LED-mode thresholds: temp limits [<cold> <hot>]",
+		 cmd_temp_limits, 1, 2);
 
 /* "temp" on its own runs cmd_temp; "temp limits ..." runs the subcommand. */
 SHELL_CMD_REGISTER(temp, &temp_cmds, "Show the latest thermistor reading", cmd_temp);
