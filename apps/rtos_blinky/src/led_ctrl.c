@@ -37,7 +37,7 @@ LOG_MODULE_REGISTER(led_ctrl, LOG_LEVEL_INF);
 #define LED_PRIORITY      7
 #define LED_STACK_SIZE    1024
 #define HOT_BLINK_MS      100
-#define HYSTERESIS_CENTI  50   /* 0.5 C */
+#define HYSTERESIS_CENTI  20   /* 0.2 C */
 #define IDLE_WAKE_MS      1000 /* max wait when not blinking, keeps the watchdog fed */
 
 BUILD_ASSERT(APP_PERIOD_MAX_MS * 2 <= APP_WDT_TIMEOUT_MS,
