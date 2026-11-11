@@ -1,0 +1,4 @@
+{
+    "terminal.integrated.defaultProfile.osx": "Zephyr IDE Terminal",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/.vscode/compile_commands.json"
+}
