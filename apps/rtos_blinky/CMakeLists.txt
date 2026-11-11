@@ -15,4 +15,5 @@ target_sources(app PRIVATE
   src/channels.c
   src/led_ctrl.c
   src/temp_monitor.c
+  src/ble_beacon.c
 )
