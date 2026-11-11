@@ -7,6 +7,9 @@
  * - button thread: woken by the SW0 interrupt via a semaphore; sends the
  *                  next preset period to the message queue.
  * - shell:         "blink set <ms>" sends any period to the same queue.
+ * - watchdog:      fed by the blink thread on every loop, so a stuck or
+ *                  suspended blink thread resets the chip.
+ * - thermistor:    sampled periodically on the system work queue (thermistor.c).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,8 +17,13 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/watchdog.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <cmsis_core.h>
+#include <cy_syslib.h>
+
+#include "thermistor.h"
 
 LOG_MODULE_REGISTER(rtos_blinky, LOG_LEVEL_INF);
 
@@ -28,9 +36,18 @@ static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
 #define STACK_SIZE      1024
 #define DEBOUNCE_MS     50
 #define PERIOD_MIN_MS   10
-#define PERIOD_MAX_MS   10000
+/* The blink thread feeds the watchdog once per loop, so its longest wait
+ * (one blink period) must stay well below the watchdog timeout.
+ */
+#define PERIOD_MAX_MS   2000
+#define WDT_TIMEOUT_MS  4000
+
+BUILD_ASSERT(PERIOD_MAX_MS * 2 <= WDT_TIMEOUT_MS, "blink period too close to watchdog timeout");
 
 static const uint32_t preset_periods_ms[] = {500, 250, 100, 1000};
+
+static const struct device *const wdt = DEVICE_DT_GET(DT_ALIAS(watchdog0));
+static int wdt_channel = -1; /* -1: watchdog not running */
 
 /*
  * Queue of requested blink periods: each message is one uint32_t (ms),
@@ -70,6 +87,11 @@ static void blink_thread(void *p1, void *p2, void *p3)
 	uint32_t new_period_ms;
 
 	while (true) {
+		/* Proof of life: if this loop stops running, the chip resets. */
+		if (wdt_channel >= 0) {
+			wdt_feed(wdt, wdt_channel);
+		}
+
 		/*
 		 * Block until a message arrives OR one blink period passes. This
 		 * replaces k_msleep(): the thread still sleeps, but a new period
@@ -151,11 +173,67 @@ K_THREAD_DEFINE(blink_tid, STACK_SIZE, blink_thread, NULL, NULL, NULL,
 K_THREAD_DEFINE(button_tid, STACK_SIZE, button_thread, NULL, NULL, NULL,
 		BUTTON_PRIORITY, 0, SYS_FOREVER_MS);
 
+static void report_reset_cause(void)
+{
+	/* Zephyr's hwinfo reset-cause API isn't implemented for PSoC 6 in this tree,
+	 * so read the SRSS reset-cause register through the Infineon PDL directly.
+	 */
+	uint32_t reason = Cy_SysLib_GetResetReason();
+
+	if (reason & CY_SYSLIB_RESET_HWWDT) {
+		LOG_WRN("Last reset was caused by the WATCHDOG");
+	} else {
+		LOG_INF("Reset cause: 0x%08x", reason);
+	}
+	/* Clear it so the next boot reports its own cause, not this one. */
+	Cy_SysLib_ClearResetReason();
+}
+
+static void watchdog_start(void)
+{
+	/* The PSoC 6 WDT keeps counting while the CPU is halted at a breakpoint,
+	 * so leave it off while debug is enabled (DHCSR.C_DEBUGEN). Only the
+	 * debugger can set this bit and software can't clear it; a soft reset
+	 * (e.g. after flashing) keeps it, an XRES (RESET button) or power cycle clears it.
+	 */
+	if (DCB->DHCSR & DCB_DHCSR_C_DEBUGEN_Msk) {
+		LOG_WRN("Debug enabled: watchdog not started. Press RESET (SW1) to arm it.");
+		return;
+	}
+
+	if (!device_is_ready(wdt)) {
+		LOG_ERR("Watchdog device not ready");
+		return;
+	}
+
+	const struct wdt_timeout_cfg cfg = {
+		.window.max = WDT_TIMEOUT_MS,
+		.flags = WDT_FLAG_RESET_SOC,
+	};
+	int channel = wdt_install_timeout(wdt, &cfg);
+
+	if (channel < 0) {
+		LOG_ERR("Watchdog install failed (%d)", channel);
+		return;
+	}
+
+	int ret = wdt_setup(wdt, 0);
+
+	if (ret < 0) {
+		LOG_ERR("Watchdog setup failed (%d)", ret);
+		return;
+	}
+
+	wdt_channel = channel;
+	LOG_INF("Watchdog started (%d ms timeout)", WDT_TIMEOUT_MS);
+}
+
 int main(void)
 {
 	int ret;
 
 	LOG_INF("RTOS blinky on %s", CONFIG_BOARD);
+	report_reset_cause();
 
 	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
 		LOG_ERR("GPIO device not ready");
@@ -183,10 +261,17 @@ int main(void)
 	gpio_init_callback(&button_cb_data, button_isr, BIT(button.pin));
 	gpio_add_callback(button.port, &button_cb_data);
 
+	/* Start the watchdog just before the thread that feeds it. */
+	watchdog_start();
 	k_thread_start(blink_tid);
 	k_thread_start(button_tid);
 
-	LOG_INF("Threads started. Press SW0 or type 'blink set <ms>'.");
+	ret = thermistor_init();
+	if (ret < 0) {
+		LOG_ERR("Thermistor init failed (%d)", ret);
+	}
+
+	LOG_INF("Threads started. Press SW0 or try 'blink set <ms>' and 'temp'.");
 
 	/* Returning from main() just ends the main thread; the others keep running. */
 	return 0;

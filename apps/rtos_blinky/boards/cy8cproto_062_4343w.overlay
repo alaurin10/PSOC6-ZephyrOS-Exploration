@@ -1,0 +1,45 @@
+/*
+ * Board overlay for the CY8CPROTO-062-4343W: onboard thermistor (RT1).
+ *
+ * Kit guide schematic (Figure A-11):
+ *
+ *   P10.0 ---[ R39 10k ]---+---[ RT1 NTC 10k ]--- P10.3
+ *                          |
+ *                      THERM_OUT -> P10.1 (ADC0 channel 1)
+ *
+ * Both ends of the divider are GPIOs, so the app powers the divider only
+ * while measuring and can swap its polarity (see src/thermistor.c).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/ {
+	/* zephyr,user is a free-form node for application-specific properties. */
+	zephyr,user {
+		io-channels = <&adc0 1>;
+		therm-res-gpios = <&gpio_prt10 0 GPIO_ACTIVE_HIGH>;
+		therm-ntc-gpios = <&gpio_prt10 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&gpio_prt10 {
+	status = "okay";
+};
+
+&adc0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* The Infineon driver only supports gain 1, the internal reference and 12 bits. */
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+		zephyr,input-positive = <1>; /* P10.1 */
+	};
+};
