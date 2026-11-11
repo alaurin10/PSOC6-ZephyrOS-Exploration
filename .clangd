@@ -1,0 +1,7 @@
+# clangd reuses the GCC compile commands from the Zephyr build (compile_commands.json).
+# Drop GCC-only flags that clang doesn't understand, so they don't show up as errors.
+CompileFlags:
+  Remove:
+    - -fno-printf-return-value
+    - -mfp16-format=*
+    - -fno-reorder-functions

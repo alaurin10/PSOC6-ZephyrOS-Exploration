@@ -8,5 +8,12 @@
         "--header-insertion=never",
         "--query-driver=C:/Users/laurin/**/*"
     ],
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "git.repositoryScanIgnoredFolders": [
+        "ifx-zephyr",
+        "ifx-zephyr-sdk",
+        "modules",
+        "bootloader"
+    ]
 }

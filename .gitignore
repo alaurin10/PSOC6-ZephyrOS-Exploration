@@ -3,6 +3,8 @@ external
 **/build*/
 .vscode/compile_commands.json
 .vscode/extensions.json
+.vscode/.cache/
+.logs/
 
 # West-managed checkouts (recreate with: west init -m https://github.com/Infineon/ifx-zephyr-sdk . && west update)
 .west/
