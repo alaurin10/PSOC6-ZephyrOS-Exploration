@@ -4,6 +4,7 @@
  * Modules (each one publishes or observes zbus channels, see channels.h):
  * - thermistor.c:     samples RT1 once per second, publishes temp_chan.
  * - capsense_input.c: buttons and slider, publishes input_chan and ctrl_chan.
+ * - audio_capture.c:  PDM microphone stream (driver in ext/drivers/audio).
  * - ui_ctrl.c:        dashboard state machine, owns ui_chan.
  * - app_settings.c:   persisted UI state.
  * - app_watchdog.c:   hardware watchdog fed by a liveness supervisor.
@@ -18,6 +19,7 @@
 
 #include "app_settings.h"
 #include "app_watchdog.h"
+#include "audio_capture.h"
 #include "capsense_input.h"
 #include "thermistor.h"
 #include "ui_ctrl.h"
@@ -50,8 +52,9 @@ int main(void)
 	}
 
 	capsense_input_start();
+	audio_capture_start();
 
-	LOG_INF("Started. Try 'ui', 'temp', 'capsense', 'bus watch on'.");
+	LOG_INF("Started. Try 'ui', 'mic level', 'temp', 'capsense', 'bus watch on'.");
 
 	/* Returning from main() just ends the main thread; the others keep running. */
 	return 0;

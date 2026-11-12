@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  PSoC 6 (CAT1A) AUDIOSS PDM-to-PCM converter (the "PDM-PCM v1" block),
+  exposed through the Zephyr DMIC API.
+
+  Zephyr's own "infineon,pdm" driver is for the newer PDM-PCM v2 block (PSOC
+  Edge), which has a different register layout.
+
+  The converter takes one PDM data line carrying a left and a right
+  microphone (selected by each microphone's L/R pin) and outputs mono-left,
+  mono-right or interleaved stereo PCM.
+
+  Without "dmas" the driver empties the hardware FIFO from its interrupt.
+  With "dmas" (and CONFIG_DMIC_PSOC6_PDM_DMA) a DataWire channel moves the
+  samples straight into the application's buffers, ping-ponging between two
+  of them, and the CPU only runs once per finished buffer. On PSoC 6 the
+  PDM's DMA request is wired one-to-one to DataWire 1 channel 26.
+
+  Example:
+
+    pdm0: pdm@40a00000 {
+      compatible = "infineon,cat1a-pdm";
+      reg = <0x40a00000 0x1000>;
+      interrupts = <157 6>;
+      clocks = <&clk_hf1>;
+      dmas = <&dma1 26>;
+      dma-names = "rx";
+      pinctrl-0 = <&p10_4_pdm_clk &p10_5_pdm_data>;
+      pinctrl-names = "default";
+    };
+
+compatible: "infineon,cat1a-pdm"
+
+include: [base.yaml, pinctrl-device.yaml]
+
+properties:
+  reg:
+    required: true
+
+  interrupts:
+    required: true
+
+  clocks:
+    required: true
+    description: |
+      The high-frequency clock feeding the audio subsystem. On PSoC 6 this is
+      always clk_hf1; pick its frequency so the PDM clock (sample rate x
+      decimation rate) divides it evenly, e.g. 24.576 MHz for 8/16/32/48 kHz.
+
+  pinctrl-0:
+    required: true
+
+  pinctrl-names:
+    required: true
+
+  dmas:
+    description: |
+      Optional DataWire channel for the receive FIFO. Must be <&dma1 26>.
+      The dma1 node itself stays disabled: this driver programs the channel
+      directly, because Zephyr's DataWire driver can't run an endless
+      ping-pong chain.
+
+  dma-names:
+    description: Must be "rx" when dmas is set.
+
+  decimation-rate:
+    type: int
+    default: 64
+    description: |
+      PDM clock cycles per PCM sample (oversampling ratio). The PDM clock
+      on the microphone pin is sample rate x decimation rate, e.g.
+      16 kHz x 64 = 1.024 MHz. Even, 16 to 254.
+
+  high-pass-gain:
+    type: int
+    default: 8
+    description: |
+      Corner of the DC-blocking high-pass filter:
+      H(z) = (1 - z^-1) / (1 - (1 - 2^-gain) z^-1). Larger = lower corner.
+      0 to 15.
+
+  cko-delay:
+    type: int
+    default: 0
+    enum: [0, 1, 2, 3, 4, 5, 6, 7]
+    description: |
+      When the converter samples the data line relative to the PDM clock
+      edge: 0 = three PDM_CLK periods early ... 3 = no delay ... 7 = four
+      periods late. Only needs changing if the microphones' data-valid
+      timing doesn't fit the default.

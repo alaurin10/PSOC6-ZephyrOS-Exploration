@@ -4,4 +4,47 @@
 
 mainmenu "Sound dashboard"
 
+menu "Audio capture"
+
+config APP_AUDIO_SAMPLE_RATE
+	int "Microphone sample rate (Hz)"
+	default 16000
+	range 8000 48000
+
+config APP_AUDIO_BLOCK_SAMPLES
+	int "Samples per capture block"
+	default 512
+	help
+	  The microphone is read in blocks of this many samples; each block is
+	  analyzed as it arrives (512 samples = 32 ms at 16 kHz). Must be a
+	  power of two.
+
+config APP_AUDIO_BLOCK_COUNT
+	int "Capture blocks"
+	default 8
+	help
+	  Blocks in the capture memory slab: two are being filled by the
+	  driver, the rest absorb delays in the analysis thread.
+
+choice APP_AUDIO_MIC
+	prompt "Microphone"
+	default APP_AUDIO_MIC_LEFT
+
+config APP_AUDIO_MIC_LEFT
+	bool "Left channel of the PDM line"
+
+config APP_AUDIO_MIC_RIGHT
+	bool "Right channel of the PDM line"
+
+endchoice
+
+config APP_AUDIO_GAIN_DB
+	int "PDM converter gain (dB)"
+	default 0
+	range -12 10
+	help
+	  Applied by the PDM-PCM converter in 1.5 dB steps.
+
+endmenu
+
 source "Kconfig.zephyr"

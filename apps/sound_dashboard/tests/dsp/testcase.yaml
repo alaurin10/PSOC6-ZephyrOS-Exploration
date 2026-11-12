@@ -1,0 +1,10 @@
+tests:
+  sound_dashboard.dsp:
+    tags: dsp
+    platform_allow:
+      - cy8cproto_062_4343w
+      - mps2/an386
+      - qemu_cortex_m3
+      - qemu_cortex_m0
+    integration_platforms:
+      - mps2/an386

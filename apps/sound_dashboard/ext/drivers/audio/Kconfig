@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config AUDIO_DMIC_PSOC6_PDM
+	bool "PSoC 6 (CAT1A) PDM-to-PCM converter"
+	default y
+	depends on DT_HAS_INFINEON_CAT1A_PDM_ENABLED
+	depends on AUDIO_DMIC
+	select PINCTRL
+	help
+	  DMIC driver for the PDM-PCM v1 block in the PSoC 6 audio subsystem.
+
+if AUDIO_DMIC_PSOC6_PDM
+
+config DMIC_PSOC6_PDM_QUEUE_SIZE
+	int "Receive queue length"
+	default 8
+	help
+	  Filled blocks waiting for dmic_read(). Should match the number of
+	  blocks in the application's memory slab.
+
+# Kconfig splits macro arguments on commas, so pass the compatible through a variable.
+DT_COMPAT_INFINEON_CAT1A_PDM := infineon,cat1a-pdm
+
+config DMIC_PSOC6_PDM_DMA
+	bool "Move samples with DMA"
+	default y
+	depends on $(dt_compat_any_has_prop,$(DT_COMPAT_INFINEON_CAT1A_PDM),dmas)
+	select USE_INFINEON_DMA
+	help
+	  A DataWire channel copies the samples from the PDM FIFO into the
+	  application's buffers, ping-ponging between two of them, so the CPU
+	  only runs once per block instead of every 128 samples. The block size
+	  must split into DMA bursts: (samples per block) = burst x count with
+	  burst <= 128 and count <= 256.
+
+endif # AUDIO_DMIC_PSOC6_PDM

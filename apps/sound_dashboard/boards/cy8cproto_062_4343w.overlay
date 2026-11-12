@@ -8,6 +8,10 @@
  *                            |
  *                        THERM_OUT -> P10.1 (ADC0 channel 1)
  *
+ * - The PDM microphones: one PDM data line (P10.5) shared by a left and a
+ *   right microphone, clocked from P10.4 by the audio subsystem's PDM-PCM
+ *   converter (driver in ext/drivers/audio), and the audio clock it runs from.
+ *
  * - A flash partition for persistent settings (UI state, Wi-Fi credentials).
  *
  * P0.4 is both the SW0 button and the Wi-Fi host-wake interrupt line in the
@@ -19,6 +23,10 @@
 #include <zephyr/dt-bindings/adc/adc.h>
 
 / {
+	aliases {
+		dmic0 = &pdm0;
+	};
+
 	chosen {
 		/* Where the Settings subsystem (ZMS backend) keeps its data. */
 		zephyr,settings-partition = &storage_partition;
@@ -31,6 +39,50 @@
 		therm-ntc-gpios = <&gpio_prt10 3 GPIO_ACTIVE_HIGH>;
 		/* Hardware timer that paces thermistor sampling. */
 		sample-counter = <&counter0_0>;
+	};
+
+	soc {
+		/* AUDIOSS0 PDM-to-PCM converter (not in the SoC devicetree). */
+		pdm0: pdm@40a00000 {
+			compatible = "infineon,cat1a-pdm";
+			reg = <0x40a00000 0x1000>;
+			interrupts = <157 6>; /* audioss_0_interrupt_pdm */
+			clocks = <&clk_hf1>;
+			/* The PDM's DMA request is wired to DataWire 1 channel 26. */
+			dmas = <&dma1 26>;
+			dma-names = "rx";
+			pinctrl-0 = <&p10_4_pdm_clk &p10_5_pdm_data>;
+			pinctrl-names = "default";
+			status = "okay";
+		};
+	};
+};
+
+/*
+ * Audio clock: PLL0 (path 1, fed from the 8 MHz IMO) at 24.576 MHz, a multiple
+ * of every standard audio rate, drives CLK_HF1 for the audio subsystem.
+ * The PLL gets as close as its dividers allow (24.571 MHz, -0.02 %).
+ */
+&pll0 {
+	clock-frequency = <24576000>;
+	status = "okay";
+};
+
+&clk_hf1 {
+	clocks = <&pll0>;
+	clock-div = <1>;
+	status = "okay";
+};
+
+&pinctrl {
+	p10_4_pdm_clk: p10_4_pdm_clk {
+		pinmux = <DT_CAT1_PINMUX(10, 4, HSIOM_SEL_ACT_9)>; /* audioss[0].pdm_clk */
+		drive-push-pull;
+	};
+
+	p10_5_pdm_data: p10_5_pdm_data {
+		pinmux = <DT_CAT1_PINMUX(10, 5, HSIOM_SEL_ACT_9)>; /* audioss[0].pdm_data */
+		input-enable;
 	};
 };
 

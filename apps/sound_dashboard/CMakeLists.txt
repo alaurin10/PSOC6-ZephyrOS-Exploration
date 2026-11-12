@@ -26,6 +26,8 @@ target_sources(app PRIVATE
   src/app_watchdog.c
   src/capsense_input.c
   src/ui_ctrl.c
+  src/audio_capture.c
+  src/audio_dsp.c
 )
 
 # ---- CapSense -----------------------------------------------------------------
