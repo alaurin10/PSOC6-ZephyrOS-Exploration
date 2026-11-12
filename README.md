@@ -1,4 +1,4 @@
-# PSoC 6 Exploration
+# PSoC 6 ZephyrOS Exploration
 
 A collection of embedded projects on the **Infineon CY8CPROTO-062-4343W** prototyping kit,
 built with **Zephyr RTOS**. Each project lives in its own folder under [`apps/`](apps) and
