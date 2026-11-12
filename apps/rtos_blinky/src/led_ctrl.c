@@ -1,11 +1,11 @@
 /*
  * LED controller built on the Zephyr State Machine Framework (SMF).
  *
- *   ROOT                      new user period -> save, apply if state uses it
+ *   ROOT                      new user period -> save, apply if in MANUAL
  *   +-- TEMP                  temperature -> pick child; mode -> MANUAL
  *   |   +-- COLD              LED solid on
- *   |   +-- NORMAL (initial)  blink at the user period
- *   |   +-- HOT               fast blink
+ *   |   +-- NORMAL (initial)  slow 1 s blink
+ *   |   +-- HOT               fast 100 ms blink
  *   +-- MANUAL                blink at the user period; mode -> TEMP
  *
  * Events arrive on one message queue (button, shell, zbus listener). Each
@@ -36,6 +36,7 @@ LOG_MODULE_REGISTER(led_ctrl, LOG_LEVEL_INF);
 
 #define LED_PRIORITY      7
 #define LED_STACK_SIZE    1024
+#define NORMAL_BLINK_MS   1000
 #define HOT_BLINK_MS      100
 #define HYSTERESIS_CENTI  20   /* 0.2 C */
 #define IDLE_WAKE_MS      1000 /* max wait when not blinking, keeps the watchdog fed */
@@ -207,9 +208,8 @@ static void cold_entry(void *o_)
 
 static void normal_entry(void *o_)
 {
-	struct led_obj *o = o_;
-
-	enter_leaf(o, NORMAL, o->user_period_ms, true);
+	/* Temperature mode has its own rates; the user period is for MANUAL only. */
+	enter_leaf(o_, NORMAL, NORMAL_BLINK_MS, false);
 }
 
 static void hot_entry(void *o_)
@@ -323,10 +323,10 @@ static int cmd_led(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "Mode %s, state %s", s == MANUAL ? "manual" : "temperature",
 		    state_names[s]);
 	if (blink) {
-		shell_print(sh, "Blinking every %u ms (user period %u ms)", blink,
+		shell_print(sh, "Blinking every %u ms (manual-mode period %u ms)", blink,
 			    app_settings_period_ms());
 	} else {
-		shell_print(sh, "Solid on (user period %u ms)", app_settings_period_ms());
+		shell_print(sh, "Solid on (manual-mode period %u ms)", app_settings_period_ms());
 	}
 	return 0;
 }

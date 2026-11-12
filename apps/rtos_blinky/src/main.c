@@ -106,7 +106,7 @@ static int cmd_blink_set(const struct shell *sh, size_t argc, char **argv)
  * SHELL_CMD_ARG(..., 2, 0): 2 mandatory args (the "set" token + <ms>), 0 optional.
  */
 SHELL_STATIC_SUBCMD_SET_CREATE(blink_cmds,
-	SHELL_CMD_ARG(set, NULL, "Set the user blink period: blink set <ms>", cmd_blink_set, 2, 0),
+	SHELL_CMD_ARG(set, NULL, "Set the manual-mode blink period: blink set <ms>", cmd_blink_set, 2, 0),
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(blink, &blink_cmds, "Control the LED blink rate", NULL);
 
