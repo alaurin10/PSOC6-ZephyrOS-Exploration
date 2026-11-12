@@ -31,7 +31,7 @@ sensor node.
   in nRF Connect.
 - 👆 **Touch controls**: CAPSENSE buttons switch between temperature and manual modes,
   and the slider sets the blink rate.
-- 💾 **Remembers** its settings across power cycles, and 🐕 **recovers** from a stuck
+- 💾 **Remembers** its settings across power cycles, and recovers from a stuck
   thread with a hardware watchdog.
 
 The modules don't call each other directly. They talk through Zephyr's **zbus** message
