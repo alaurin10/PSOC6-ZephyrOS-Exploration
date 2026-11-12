@@ -30,3 +30,11 @@ ZBUS_CHAN_DEFINE(temp_chan,               /* name */
 		 ZBUS_OBSERVERS_EMPTY,    /* observers are added elsewhere */
 		 ZBUS_MSG_INIT(0)         /* initial value: seq 0 = "no reading yet" */
 );
+
+ZBUS_CHAN_DEFINE(led_chan,
+		 struct led_msg,
+		 NULL,                    /* no validator */
+		 NULL,
+		 ZBUS_OBSERVERS_EMPTY,
+		 ZBUS_MSG_INIT(0)         /* temperature mode until the controller publishes */
+);

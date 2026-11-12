@@ -29,6 +29,16 @@ struct temp_msg {
 
 ZBUS_CHAN_DECLARE(temp_chan);
 
+/* Published by the LED controller whenever its mode, state or periods change. */
+struct led_msg {
+	uint8_t manual;            /* 1 = manual mode, 0 = temperature mode */
+	char state[8];             /* "COLD", "NORMAL", "HOT", "MANUAL" */
+	uint32_t blink_ms;         /* current toggle interval, 0 = solid on */
+	uint32_t manual_period_ms; /* period used in manual mode */
+};
+
+ZBUS_CHAN_DECLARE(led_chan);
+
 /* printf helpers for centi-degree values: printk(CENTI_FMT " C", CENTI_ARGS(v)) */
 #define CENTI_FMT       "%s%d.%02d"
 #define CENTI_ARGS(v)   ((v) < 0 ? "-" : ""), abs(v) / 100, abs(v) % 100

@@ -4,7 +4,7 @@
  *   BTN0 (CSX)  : LED follows the temperature   (led mode temp)
  *   BTN1 (CSX)  : LED blinks at the user period (led mode manual)
  *   Slider (CSD): sets the manual-mode blink rate, 0.5 Hz (left) .. 10 Hz
- *                 (right); visible in manual mode, saved in either mode
+ *                 (right); ignored in temperature mode
  *
  * Infineon's CapSense middleware does the sensing; this file replaces the
  * ModusToolbox BSP init (clock divider, pins, interrupt) with Zephyr code:
@@ -28,6 +28,7 @@
 
 #include "cycfg_capsense.h"
 #include "app_settings.h"
+#include "channels.h"
 #include "led_ctrl.h"
 
 LOG_MODULE_REGISTER(capsense, LOG_LEVEL_INF);
@@ -184,6 +185,7 @@ static uint32_t slider_to_period_ms(uint32_t pos)
 static void handle_inputs(void)
 {
 	static bool btn0_was, btn1_was;
+	static bool slider_used; /* this touch is changing the period */
 	static uint32_t last_sent_ms;
 
 	bool btn0 = Cy_CapSense_IsWidgetActive(CY_CAPSENSE_BUTTON0_WDGT_ID, &cy_capsense_context);
@@ -205,16 +207,31 @@ static void handle_inputs(void)
 		Cy_CapSense_GetTouchInfo(CY_CAPSENSE_LINEARSLIDER0_WDGT_ID, &cy_capsense_context);
 
 	if (touch->numPosition == 0U) {
-		if (atomic_set(&slider_pos, -1) != -1) {
+		if (atomic_set(&slider_pos, -1) != -1 && slider_used) {
 			LOG_INF("Slider released at %u ms", last_sent_ms);
 		}
+		slider_used = false;
 		return;
 	}
 
 	uint32_t pos = touch->ptrPosition[0].x;
+	bool new_touch = atomic_set(&slider_pos, pos) == -1;
+
+	/* The slider only sets the manual-mode period. Ask the LED controller's
+	 * zbus channel (it always holds the latest status) which mode we're in.
+	 */
+	struct led_msg led;
+
+	if (zbus_chan_read(&led_chan, &led, K_MSEC(5)) != 0 || !led.manual) {
+		if (new_touch) {
+			LOG_INF("Slider ignored: not in manual mode (touch BTN1)");
+		}
+		return;
+	}
+
 	uint32_t period = slider_to_period_ms(pos);
 
-	atomic_set(&slider_pos, pos);
+	slider_used = true;
 
 	/* Sliding produces a new position every scan; skip tiny changes so the
 	 * LED queue isn't flooded. Settings save once, 2 s after the last change.

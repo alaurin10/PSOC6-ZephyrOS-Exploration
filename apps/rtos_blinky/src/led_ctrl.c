@@ -111,6 +111,21 @@ static const struct smf_state states[NUM_STATES];
 static atomic_t cur_state = ATOMIC_INIT(NORMAL);
 static atomic_t cur_blink_ms;
 
+/* Tell the rest of the app (CapSense, BLE) what the LED is doing now. */
+static void publish_status(const struct led_obj *o)
+{
+	enum led_state s = (enum led_state)atomic_get(&cur_state);
+	struct led_msg m = {
+		.manual = s == MANUAL,
+		.blink_ms = o->blink_ms,
+		.manual_period_ms = o->user_period_ms,
+	};
+
+	strncpy(m.state, state_names[s], sizeof(m.state) - 1);
+	/* Short timeout: never hold up blinking for a slow observer. */
+	(void)zbus_chan_pub(&led_chan, &m, K_MSEC(10));
+}
+
 static void enter_leaf(struct led_obj *o, enum led_state s, uint32_t blink_ms, bool follows)
 {
 	atomic_set(&cur_state, s);
@@ -123,6 +138,7 @@ static void enter_leaf(struct led_obj *o, enum led_state s, uint32_t blink_ms, b
 		o->next_toggle_ms = k_uptime_get() + blink_ms;
 	}
 	LOG_INF("LED state -> %s (%s)", state_names[s], blink_ms ? "blinking" : "solid on");
+	publish_status(o);
 }
 
 /* Pick COLD/NORMAL/HOT. Leaving COLD or HOT requires moving 0.5 C back past
@@ -162,6 +178,7 @@ static enum smf_state_result root_run(void *o_)
 			o->blink_ms = o->user_period_ms;
 			atomic_set(&cur_blink_ms, o->blink_ms);
 		}
+		publish_status(o);
 	}
 	/* Anything else reaching ROOT (e.g. "mode TEMP" while in TEMP) is ignored. */
 	return SMF_EVENT_HANDLED;

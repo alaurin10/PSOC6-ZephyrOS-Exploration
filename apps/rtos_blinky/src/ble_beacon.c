@@ -14,6 +14,8 @@
  * GATT (after connecting): Environmental Sensing service with a Temperature
  * characteristic (read + notify). Apps such as nRF Connect know this
  * standard characteristic and show it decoded in degrees C.
+ * A custom LED service adds the current blink period (uint16, ms) and a text
+ * status, both notified whenever the LED controller publishes on led_chan.
  *
  * Only one connection is allowed. Connectable advertising stops when a
  * central connects; this thread restarts it after the disconnect.
@@ -69,8 +71,10 @@ static const struct bt_le_adv_param *const adv_param =
  * publisher (the system work queue). Starts disabled so its queue doesn't
  * fill up while bt_enable() is still downloading firmware.
  */
-ZBUS_SUBSCRIBER_DEFINE_WITH_ENABLE(ble_sub, 2, false);
+ZBUS_SUBSCRIBER_DEFINE_WITH_ENABLE(ble_sub, 4, false);
 ZBUS_CHAN_ADD_OBS(temp_chan, ble_sub, 4);
+/* LED status changes (mode, state, slider) are pushed out as GATT notifications. */
+ZBUS_CHAN_ADD_OBS(led_chan, ble_sub, 1);
 
 static atomic_t adv_updates;
 static atomic_t adv_running;
@@ -78,6 +82,8 @@ static atomic_t adv_centi = ATOMIC_INIT(INT32_MIN);
 static atomic_t connected;
 static atomic_t notify_enabled;
 static atomic_t notifications_sent;
+static atomic_t period_notify_enabled;
+static atomic_t status_notify_enabled;
 
 /* ---- GATT: Environmental Sensing service --------------------------------- */
 
@@ -119,6 +125,116 @@ BT_GATT_SERVICE_DEFINE(ess_svc,
 
 #define TEMP_VALUE_ATTR (&ess_svc.attrs[2])
 
+/* ---- GATT: custom LED service --------------------------------------------- */
+
+/*
+ * There's no standard Bluetooth service for "LED blink period", so it gets
+ * its own random 128-bit UUIDs (base a5c4xxxx-6d4b-4b1e-9b8d-2f7a1c3e5d00).
+ */
+#define LED_UUID(n) BT_UUID_128_ENCODE(0xa5c40000 + (n), 0x6d4b, 0x4b1e, 0x9b8d, 0x2f7a1c3e5d00)
+
+static const struct bt_uuid_128 led_svc_uuid = BT_UUID_INIT_128(LED_UUID(1));
+static const struct bt_uuid_128 led_period_uuid = BT_UUID_INIT_128(LED_UUID(2));
+static const struct bt_uuid_128 led_status_uuid = BT_UUID_INIT_128(LED_UUID(3));
+
+/* Current blink interval in ms (0 = solid on) and a human-readable summary.
+ * 20 bytes fits a notification at the default ATT MTU (23).
+ */
+static uint16_t gatt_period_ms;
+static char gatt_status[20] = "?";
+
+/* Characteristic Presentation Format: unsigned 16-bit, unit seconds x 10^-3. */
+static const struct bt_gatt_cpf period_cpf = {
+	.format = 0x06,        /* uint16 */
+	.exponent = -3,
+	.unit = 0x2703,        /* org.bluetooth.unit.time.second */
+	.name_space = 0x01,    /* Bluetooth SIG */
+	.description = 0x0000, /* unknown */
+};
+
+static ssize_t read_period(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
+			   uint16_t len, uint16_t offset)
+{
+	uint8_t le[2];
+
+	sys_put_le16(gatt_period_ms, le);
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, le, sizeof(le));
+}
+
+static ssize_t read_status(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
+			   uint16_t len, uint16_t offset)
+{
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, gatt_status, strlen(gatt_status));
+}
+
+static void period_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	ARG_UNUSED(attr);
+	atomic_set(&period_notify_enabled, value == BT_GATT_CCC_NOTIFY);
+	LOG_INF("Blink period notifications %s", value == BT_GATT_CCC_NOTIFY ? "on" : "off");
+}
+
+static void status_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	ARG_UNUSED(attr);
+	atomic_set(&status_notify_enabled, value == BT_GATT_CCC_NOTIFY);
+	LOG_INF("LED status notifications %s", value == BT_GATT_CCC_NOTIFY ? "on" : "off");
+}
+
+/*
+ *   [0] primary service      [5] presentation format
+ *   [1] period declaration   [6] status declaration
+ *   [2] period value         [7] status value      <- notified
+ *   [3] period CCC           [8] status CCC
+ *   [4] period description   [9] status description
+ */
+BT_GATT_SERVICE_DEFINE(led_svc,
+	BT_GATT_PRIMARY_SERVICE(&led_svc_uuid),
+	BT_GATT_CHARACTERISTIC(&led_period_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ, read_period, NULL, NULL),
+	BT_GATT_CCC(period_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CUD("Blink period (ms)", BT_GATT_PERM_READ),
+	BT_GATT_CPF(&period_cpf),
+	BT_GATT_CHARACTERISTIC(&led_status_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_READ, read_status, NULL, NULL),
+	BT_GATT_CCC(status_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CUD("LED status", BT_GATT_PERM_READ),
+);
+
+#define PERIOD_VALUE_ATTR (&led_svc.attrs[2])
+#define STATUS_VALUE_ATTR (&led_svc.attrs[7])
+
+static void update_led_values(const struct led_msg *m)
+{
+	gatt_period_ms = (uint16_t)MIN(m->blink_ms, UINT16_MAX);
+	/* Worst case "MANUAL 65535 ms" = 15 chars: always fits in 20. */
+	if (m->blink_ms) {
+		snprintk(gatt_status, sizeof(gatt_status), "%.7s %u ms", m->state, gatt_period_ms);
+	} else {
+		snprintk(gatt_status, sizeof(gatt_status), "%.7s solid", m->state);
+	}
+}
+
+static void notify_led_values(void)
+{
+	if (!atomic_get(&connected)) {
+		return;
+	}
+	if (atomic_get(&period_notify_enabled)) {
+		uint8_t le[2];
+
+		sys_put_le16(gatt_period_ms, le);
+		if (bt_gatt_notify(NULL, PERIOD_VALUE_ATTR, le, sizeof(le)) == 0) {
+			atomic_inc(&notifications_sent);
+		}
+	}
+	if (atomic_get(&status_notify_enabled)) {
+		if (bt_gatt_notify(NULL, STATUS_VALUE_ATTR, gatt_status, strlen(gatt_status)) == 0) {
+			atomic_inc(&notifications_sent);
+		}
+	}
+}
+
 /* ---- Connection callbacks (run in the Bluetooth RX thread) --------------- */
 
 static void on_connected(struct bt_conn *conn, uint8_t err)
@@ -142,6 +258,8 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 	ARG_UNUSED(conn);
 	atomic_set(&connected, 0);
 	atomic_set(&notify_enabled, 0);
+	atomic_set(&period_notify_enabled, 0);
+	atomic_set(&status_notify_enabled, 0);
 	LOG_INF("Disconnected (reason 0x%02x), advertising resumes with the next sample",
 		reason);
 }
@@ -224,11 +342,24 @@ static void ble_thread(void *p1, void *p2, void *p3)
 	bt_addr_le_to_str(&addr, addr_str, sizeof(addr_str));
 	LOG_INF("Bluetooth address %s", addr_str);
 
-	/* Now start receiving temperature notifications. */
+	/* Now start receiving temperature and LED notifications. */
+	struct led_msg led;
+
+	if (zbus_chan_read(&led_chan, &led, K_MSEC(100)) == 0) {
+		update_led_values(&led);
+	}
 	zbus_obs_set_enable(&ble_sub, true);
 
-	/* One pass per temperature sample (~1 s). */
+	/* One pass per temperature sample (~1 s) or LED status change. */
 	while (zbus_sub_wait(&ble_sub, &chan, K_FOREVER) == 0) {
+		if (chan == &led_chan) {
+			if (zbus_chan_read(&led_chan, &led, K_MSEC(100)) == 0) {
+				update_led_values(&led);
+				notify_led_values();
+			}
+			continue;
+		}
+
 		if (zbus_chan_read(&temp_chan, &m, K_MSEC(100)) != 0) {
 			continue;
 		}
@@ -285,6 +416,7 @@ static int cmd_ble(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Payload: name \"" NAME_PREFIX " " CENTI_FMT "C\", ESS 0x181A "
 			    "temp 0x%04x (%d x 0.01 C)", CENTI_ARGS(c), (uint16_t)(int16_t)c, c);
 	}
+	shell_print(sh, "LED service: period %u ms, status \"%s\"", gatt_period_ms, gatt_status);
 	return 0;
 }
 
