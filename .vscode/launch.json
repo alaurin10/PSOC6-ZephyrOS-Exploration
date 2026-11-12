@@ -56,6 +56,54 @@
             "openOCDLaunchCommands": ["psoc6.cpu.cm4 configure -rtos Zephyr"],
             "svdFile": "${workspaceFolder}/modules/hal/infineon/mtb-pdl-cat1/devices/COMPONENT_CAT1A/svd/psoc6_02.svd",
             "showDevDebugOutput": "none"
+        },
+        {
+            // Same flow as "rtos_blinky: Debug (CM4)", for apps/sound_dashboard.
+            "name": "sound_dashboard: Debug (CM4)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/apps/sound_dashboard/build/proto062/zephyr/zephyr.elf",
+            "gdbPath": "${env:ZEPHYR_SDK_INSTALL_DIR}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "servertype": "openocd",
+            "serverpath": "C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/bin/openocd.exe",
+            "searchDir": ["C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/scripts"],
+            "configFiles": ["${workspaceFolder}/ifx-zephyr/boards/infineon/cy8cproto_062_4343w/support/openocd.cfg"],
+            "numberOfProcessors": 2,
+            "targetProcessor": 1,
+            "openOCDLaunchCommands": ["psoc6.cpu.cm4 configure -rtos Zephyr"],
+            "svdFile": "${workspaceFolder}/modules/hal/infineon/mtb-pdl-cat1/devices/COMPONENT_CAT1A/svd/psoc6_02.svd",
+            "overrideLaunchCommands": [
+                "monitor reset init",
+                "load",
+                "monitor reset run",
+                "monitor sleep 200",
+                "monitor psoc6 reset_halt sysresetreq"
+            ],
+            "overrideRestartCommands": [
+                "monitor reset run",
+                "monitor sleep 200",
+                "monitor psoc6 reset_halt sysresetreq"
+            ],
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none"
+        },
+        {
+            "name": "sound_dashboard: Attach (CM4)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/apps/sound_dashboard/build/proto062/zephyr/zephyr.elf",
+            "gdbPath": "${env:ZEPHYR_SDK_INSTALL_DIR}/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "servertype": "openocd",
+            "serverpath": "C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/bin/openocd.exe",
+            "searchDir": ["C:/Infineon/Tools/ModusToolboxProgtools-1.9/openocd/scripts"],
+            "configFiles": ["${workspaceFolder}/ifx-zephyr/boards/infineon/cy8cproto_062_4343w/support/openocd.cfg"],
+            "numberOfProcessors": 2,
+            "targetProcessor": 1,
+            "openOCDLaunchCommands": ["psoc6.cpu.cm4 configure -rtos Zephyr"],
+            "svdFile": "${workspaceFolder}/modules/hal/infineon/mtb-pdl-cat1/devices/COMPONENT_CAT1A/svd/psoc6_02.svd",
+            "showDevDebugOutput": "none"
         }
     ]
 }

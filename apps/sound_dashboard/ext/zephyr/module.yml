@@ -1,0 +1,9 @@
+# Repo-local Zephyr module for the sound dashboard: PSoC 6 drivers and
+# devicetree bindings that the Zephyr tree doesn't provide. Added to the build
+# through ZEPHYR_EXTRA_MODULES in the app's CMakeLists.txt.
+name: sound_dashboard_ext
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .
