@@ -16,8 +16,8 @@ from there and adapted, and the modules talk through zbus channels in the same w
 > | M0 Scaffolding: sensors, zbus channels, UI state machine, watchdog supervisor | ✅ |
 > | M1 PDM microphone driver (custom, DMA) | ✅ |
 > | M2 Audio DSP: level, FFT, clap detection | ✅ |
-> | M3 Wi-Fi, web dashboard, mDNS | ⏳ |
-> | M4 CapSense and browser controls | ⏳ |
+> | M3 Wi-Fi, web dashboard, mDNS | ✅ |
+> | M4 CapSense and browser controls | ✅ |
 > | M5 QSPI flash logging (custom SMIF driver, LittleFS) | ⏳ |
 > | M6 Dual core: audio on the Cortex-M0+ | ⏳ |
 
@@ -68,11 +68,21 @@ sensitivity, which parameter the slider sets, and flashing the LED on a clap.
 | [`ui_ctrl.c`](src/ui_ctrl.c) | UI state machine, owns `ui_chan`, flashes the LED on claps |
 | [`capsense_input.c`](src/capsense_input.c) | CapSense scanning (port from rtos_blinky): publishes `input_chan` and `ctrl_chan` |
 | [`thermistor.c`](src/thermistor.c) | Ratiometric NTC measurement once a second (from rtos_blinky), publishes `temp_chan` |
+| [`wifi_mgr.c`](src/wifi_mgr.c) | Joins the stored Wi-Fi network, reconnects, DHCP, SNTP clock, signal strength; publishes `net_chan` |
+| [`web_server.c`](src/web_server.c) | HTTP server and WebSocket: serves the page, streams every channel to the browsers, turns their commands into `ctrl_chan` messages |
+| [`web/`](web) | The dashboard page (HTML, CSS, JavaScript), gzipped into the firmware at build time |
+| [`app_time.c`](src/app_time.c) | Wall-clock time from SNTP, uptime until it's set |
 | [`app_settings.c`](src/app_settings.c) | Persisted UI state (Settings on ZMS, `dash/` keys), saved 2 s after the last change on a low-priority work queue |
 | [`app_watchdog.c`](src/app_watchdog.c) | Hardware watchdog fed by a supervisor only while every key thread checks in; names the stalled thread after a watchdog reset |
 | [`bus_monitor.c`](src/bus_monitor.c) | `bus` shell diagnostics |
 | [`ext/`](ext) | Repo-local Zephyr module: the PSoC 6 PDM microphone driver and its devicetree binding |
 | [`boards/cy8cproto_062_4343w.overlay`](boards/cy8cproto_062_4343w.overlay) | Audio clock (PLL0 → CLK_HF1), PDM pins and node, thermistor, settings partition |
+
+Settings (the dashboard state and the stored Wi-Fi network) live in a 128 KB flash
+partition at 0x1D8000, separate from the 32 KB rtos_blinky uses at the end of flash. This
+flash is written in 512-byte rows and ZMS gives every entry a whole row, so one stored key
+costs up to 2 KB (name, value and a list link); 8 KB ZMS sectors waste less of that than
+4 KB ones.
 
 ### Microphone driver
 
@@ -115,10 +125,25 @@ Every 512-sample block (32 ms at 16 kHz) goes through [`audio_dsp.c`](src/audio_
 - **Claps:** the energy of the signal's first difference (a gentle high-pass that ignores
   room rumble) in 8 ms steps, against a background level that follows quiet sound quickly
   and loud sound slowly. A candidate needs a sharp rise (>9 dB in 8 ms) well above the
-  background (10–30 dB, from the clap sensitivity), and only counts if it dies away by
-  12 dB within 56 ms: speech and music sustain, claps don't. A second clap 100–700 ms after
-  the first is a double clap. The first 100 ms after the microphone starts are skipped:
-  its start-up transient looks like a clap.
+  background (10–30 dB, from the clap sensitivity), and must die away by 12 dB within
+  56 ms: speech and music sustain, claps don't. It then counts as a clap only if:
+  - its peak reaches a level set by the clap sensitivity: −20 dBFS at 0, −48 dBFS at 100,
+    −34 dBFS at the default 50;
+  - its energy is centred at 900 Hz or above. The centre is the burst's RMS frequency,
+    which comes almost for free from the ratio of the differenced to the raw energy (for a
+    tone, 4 sin²(πf/fs)).
+
+  A second clap 100–700 ms after the first is a double clap. The first 100 ms after the
+  microphone starts are skipped: its start-up transient looks like a clap.
+
+  The two checks come from recordings made on this board with the [tuning build](#tuning-build-raw-audio-recorder).
+  Claps peaked at −32 to 0 dBFS (near, and at 2–3 m) with their energy at 1.4–2.8 kHz.
+  Keyboard clicks peaked at −36 to −51 dBFS. Knocks on the desk and taps on the CapSense
+  pads reach the microphone through the board as a thump at 340–530 Hz. Replaying those
+  recordings through the detector at the default sensitivity: 13 of 13 claps detected,
+  0 of 8 knocks and taps, and 0 of 41 key clicks. Finger snaps sound like claps to this
+  microphone and are only turned down when they're quieter (about half of them). `audio`
+  shows how many bursts were turned down, and why.
 
 The analysis takes ~1.6 ms per 32 ms block on the Cortex-M4 (5 % CPU): level 0.12 ms,
 FFT and bands 1.1 ms, claps 0.2 ms, publishing 0.14 ms (`audio` shows this live). The FFT
@@ -136,17 +161,114 @@ to SRAM would speed it up if needed.
 The SW0 push button isn't used: on this board its pin (P0.4) is also the Wi-Fi host-wake
 interrupt, which the Wi-Fi driver owns.
 
+## Wi-Fi and the web dashboard
+
+### Connecting
+
+Store a network once, from the shell:
+
+```text
+wifimgr add "My Network" "my passphrase"
+```
+
+The board keeps it in flash (Zephyr's Wi-Fi credentials on Settings), joins it at every
+boot, and after losing it tries again every 2 s, backing off to once a minute. Then it
+prints where to find the dashboard:
+
+```text
+<inf> wifi_mgr: Online: http://172.20.10.6/ (also http://psoc6.local/)
+```
+
+- The CYW4343W is a 2.4 GHz WPA2 radio. For an iPhone hotspot, turn on **Maximize
+  Compatibility** (Settings → Personal Hotspot) to keep it on 2.4 GHz.
+- The shell only accepts printable ASCII, so type other SSID bytes as `\xHH`. An iPhone's
+  default hotspot name "Ann’s iPhone" has a curly apostrophe (U+2019):
+  `wifimgr add "Ann\xe2\x80\x99s iPhone" "..."`.
+- `psoc6.local` is answered by the board's mDNS responder, which also advertises the page
+  as a DNS-SD `_http._tcp` service. Windows, macOS, iOS and Android resolve `.local` names.
+- Once online, the board sets its clock from `pool.ntp.org` (SNTP), for timestamps.
+- `wifimgr` shows the connection; `wifi cred list` and `wifi cred delete` manage the stored
+  networks.
+
+### The dashboard
+
+![The dashboard in a browser](docs/dashboard.png)
+
+- **Spectrum** at ~16 frames per second, in four views: bars with falling peak caps, line,
+  waterfall, and a level meter with 30 s of history. Four colour schemes.
+- **Tiles:** sound level (RMS and peak, 30 s graph), temperature (5 min graph), the
+  CapSense buttons and slider as you touch them, and the claps (a count, the last five, and
+  a flash on the spectrum).
+- **Controls:** colour scheme, display gain, smoothing, clap sensitivity, what the CapSense
+  slider sets, freeze, and whether the LED flashes on claps. Keys: <kbd>V</kbd> next view,
+  <kbd>C</kbd> next colour, <kbd>F</kbd> freeze.
+- Every control sends a command to the board, and the page only changes when the board's
+  new state comes back. So every open page, the CapSense buttons and the shell always agree.
+- Plain HTML, CSS and JavaScript drawing on `<canvas>`, no libraries: 8 KB gzipped in the
+  firmware.
+
+Up to three pages can be open at once. A fourth is turned away with WebSocket close code
+1013 ("board busy") and keeps retrying. A page that falls behind misses frames rather than
+holding up the others; state changes are never skipped (a page that can't take one within
+200 ms is disconnected and reconnects). The board sends something at least every 2 s, and
+a page that hears nothing for 5 s reconnects: a board that lost its Wi-Fi drops its
+connections without the browser noticing.
+
+There's no TLS and no login: anyone on the same network can open the dashboard and change
+its settings. Use it on a network you trust.
+
+### HTTP and WebSocket API
+
+| Path | |
+|---|---|
+| `/`, `/app.js`, `/style.css` | The page (gzip) |
+| `/api/status` | A JSON snapshot: uptime, time, and the latest `ui`, `net`, `temp`, `in` and frame messages |
+| `/ws` | WebSocket, JSON text messages both ways |
+| `/api/rec.wav` | The last raw recording ([tuning build](#tuning-build-raw-audio-recorder) only) |
+
+Board → browser, each with a `"t"` type:
+
+| `t` | Sent | Content |
+|---|---|---|
+| `hello` | On connecting | Band centre frequencies, view, colour and parameter names |
+| `ui` | On every change | View, colour, freeze, LED on claps, slider target, parameters, and who changed it |
+| `f` | ~16 per second (not while frozen) | Level (`r` RMS, `p` peak, in 1/100 dB), clipping, 64 bands (0–100 dB above −100 dBFS) |
+| `temp` | Every second | Temperature |
+| `in` | On touch | CapSense buttons and slider position |
+| `net` | On change, every 10 s | Wi-Fi state, SSID, signal, address |
+| `ev` | On a clap | `clap`, `double` or `clip`, with the peak level |
+| `ka` | After 2 s with nothing else | Keepalive |
+
+Browser → board (checked against an allow-list and the allowed ranges, then published on
+`ctrl_chan` like a CapSense command):
+
+```json
+{"cmd": "view", "name": "waterfall"}      {"cmd": "view", "name": "next"}
+{"cmd": "colour", "value": 2}             {"cmd": "colour", "name": "next"}
+{"cmd": "param", "name": "gain", "value": 70}
+{"cmd": "slider", "name": "smooth"}
+{"cmd": "freeze", "value": 1}             {"cmd": "ledclap", "value": 0}
+```
+
+The server is Zephyr's HTTP server with HTTP/1.1 only: browsers use HTTP/2 only over TLS,
+and WebSockets start from HTTP/1.1 anyway.
+
 ## Shell
 
 Open the KitProg3 serial port at 115200 8N1:
 
 | Command | Shows / does |
 |---|---|
-| `audio` | Sound level, ASCII spectrum, clap count, analysis time per stage |
+| `audio` | Sound level, ASCII spectrum, clap count, bursts turned down (and why), analysis time per stage |
 | `mic`, `mic level [s]` | Microphone status; live level meter |
 | `mic start [left\|right]`, `mic stop` | Start/stop capturing, pick the microphone |
 | `mic stats` | Driver counters (blocks, drops, FIFO overflows, interrupts) and measured sample rate |
 | `mic dump [n]` | The next n raw samples as text, for offline analysis |
+| `mic rec` | [Tuning build](#tuning-build-raw-audio-recorder) only: record 20 s for `/api/rec.wav` |
+| `wifimgr` | Wi-Fi state, network, signal, address, interface flags, clock |
+| `wifimgr add "<SSID>" "<passphrase>"` | Store a WPA2 network and connect (other SSID bytes as `\xHH`) |
+| `wifi ...` | Zephyr's Wi-Fi shell: `wifi scan`, `wifi status`, `wifi cred list\|delete`, ... |
+| `web` | Dashboard address; per open page: frames sent and dropped, commands |
 | `ui` | Dashboard state: view, colour, parameters, what the slider sets |
 | `ui view next\|bars\|line\|waterfall\|level` | Change the view |
 | `ui colour next\|<n>`, `ui freeze [on\|off]` | Colour scheme, freeze |
@@ -179,12 +301,25 @@ west flash -d apps/sound_dashboard/build/proto062
   flashing). Press **RESET (SW1)** to arm it.
 - For debugging, use **"sound_dashboard: Debug (CM4)"** in `.vscode/launch.json`.
 
+### Tuning build: raw audio recorder
+
+[`rec.conf`](rec.conf) adds a recorder for tuning the analysis on real sound:
+
+```bash
+west build -b cy8cproto_062_4343w -d apps/sound_dashboard/build/rec apps/sound_dashboard -- -DEXTRA_CONF_FILE=rec.conf
+```
+
+(In PowerShell, quote the last argument: `"-DEXTRA_CONF_FILE=rec.conf"`.) `mic rec` records
+the next 20 s of raw samples into RAM (640 KB) with the user LED on, then
+`curl -o take.wav http://psoc6.local/api/rec.wav` downloads them as a 16 kHz mono WAV.
+Turn off "Flash LED on claps" while recording: claps flash the same LED.
+
 ### Tests
 
 The analysis has unit tests on synthetic signals ([`tests/dsp`](tests/dsp)): level
 calibration, band layout, tones landing in the right band at the right level, smoothing and
 gain, and the clap detector (single, double, far apart, sustained sound, quiet room,
-sensitivity). They run on the kit:
+sensitivity, a knock, a quiet click). They run on the kit:
 
 ```bash
 west build -b cy8cproto_062_4343w -d apps/sound_dashboard/tests/dsp/build/proto062 apps/sound_dashboard/tests/dsp
@@ -195,4 +330,6 @@ and print the results on the serial console. (`testcase.yaml` also lists QEMU ta
 the Zephyr SDK's Windows QEMU needs a MinGW runtime DLL, `libgcc_s_seh-1.dll`, that it
 doesn't ship.)
 
-**Footprint (M2):** ~182 KB flash, ~87 KB RAM.
+**Footprint (M3/M4):** ~930 KB flash, ~241 KB RAM; most of it is the Wi-Fi driver and
+firmware, the network stack and the HTTP server (M2, before Wi-Fi: ~182 KB flash, ~87 KB
+RAM).

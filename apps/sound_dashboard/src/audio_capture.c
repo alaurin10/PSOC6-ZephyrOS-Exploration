@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <zephyr/audio/dmic.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
@@ -169,6 +170,73 @@ static void copy_for_dump(const int16_t *s, size_t n)
 	}
 }
 
+/* ---- Raw recorder (tuning builds, CONFIG_APP_AUDIO_REC_SECONDS > 0) ---------------- */
+
+#if CONFIG_APP_AUDIO_REC_SECONDS > 0
+#define REC_SAMPLES (RATE * CONFIG_APP_AUDIO_REC_SECONDS)
+
+enum { REC_EMPTY, REC_RUNNING, REC_DONE };
+static int16_t rec_buf[REC_SAMPLES];
+static size_t rec_have;
+static atomic_t rec_state;
+static const struct gpio_dt_spec rec_led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+
+static void copy_for_rec(const int16_t *s, size_t n)
+{
+	if (atomic_get(&rec_state) != REC_RUNNING) {
+		return;
+	}
+
+	size_t take = MIN(n, REC_SAMPLES - rec_have);
+
+	memcpy(&rec_buf[rec_have], s, take * sizeof(int16_t));
+	rec_have += take;
+	if (rec_have == REC_SAMPLES) {
+		(void)gpio_pin_set_dt(&rec_led, 0);
+		atomic_set(&rec_state, REC_DONE);
+		LOG_INF("Recording done: GET /api/rec.wav");
+	}
+}
+
+int audio_rec_start(void)
+{
+	if (atomic_get(&rec_state) == REC_RUNNING) {
+		return -EBUSY;
+	}
+	rec_have = 0;
+	/* ui_ctrl also flashes this LED on claps unless "LED on claps" is off. */
+	(void)gpio_pin_configure_dt(&rec_led, GPIO_OUTPUT_ACTIVE);
+	atomic_set(&rec_state, REC_RUNNING);
+	return 0;
+}
+
+const int16_t *audio_rec_get(size_t *n_samples)
+{
+	if (atomic_get(&rec_state) != REC_DONE) {
+		return NULL;
+	}
+	*n_samples = REC_SAMPLES;
+	return rec_buf;
+}
+#else
+static inline void copy_for_rec(const int16_t *s, size_t n)
+{
+	ARG_UNUSED(s);
+	ARG_UNUSED(n);
+}
+
+int audio_rec_start(void)
+{
+	return -ENOTSUP;
+}
+
+const int16_t *audio_rec_get(size_t *n_samples)
+{
+	ARG_UNUSED(n_samples);
+	return NULL;
+}
+#endif
+
 static void process_block(const int16_t *s, size_t n)
 {
 	static struct ui_msg ui = {.param = {UI_PARAM_MAX / 2, 0, UI_PARAM_MAX / 2}};
@@ -209,6 +277,7 @@ static void process_block(const int16_t *s, size_t n)
 	stage_end(STAGE_PUBLISH, &t);
 
 	copy_for_dump(s, n);
+	copy_for_rec(s, n);
 	atomic_inc(&blocks_seen);
 
 	uint32_t us = k_cyc_to_us_floor32(k_cycle_get_32() - t0);
@@ -262,10 +331,6 @@ static void capture_thread(void *p1, void *p2, void *p3)
 
 	if (!device_is_ready(dmic)) {
 		LOG_ERR("Microphone %s not ready", dmic->name);
-		return;
-	}
-	if (dsp_spectrum_init(&spectrum, RATE) != 0) {
-		LOG_ERR("FFT init failed");
 		return;
 	}
 	dsp_clap_init(&clap, RATE);
@@ -337,7 +402,17 @@ K_THREAD_DEFINE(audio_cap_tid, CAP_STACK_SIZE, capture_thread, NULL, NULL, NULL,
 
 void audio_capture_start(void)
 {
+	/* Set the bands up before the thread starts: other modules ask for their frequencies. */
+	if (dsp_spectrum_init(&spectrum, RATE) != 0) {
+		LOG_ERR("FFT init failed");
+		return;
+	}
 	k_thread_start(audio_cap_tid);
+}
+
+float audio_capture_band_center_hz(int band)
+{
+	return band >= 0 && band < DSP_BANDS ? dsp_band_center_hz(&spectrum, band) : 0.0f;
 }
 
 /* ---- Shell: "audio" and "mic" ------------------------------------------------------ */
@@ -398,6 +473,12 @@ static int cmd_audio(const struct shell *sh, size_t argc, char **argv)
 		    (uint32_t)atomic_get(&claps), em.seq, em.type, block_us,
 		    (uint32_t)atomic_get(&dsp_us_last), avg_us, (uint32_t)atomic_get(&dsp_us_max),
 		    avg_us * 100 / block_us, avg_us * 1000 / block_us % 10);
+	/* Read while the capture thread may update them: fine for a status line. */
+	shell_print(sh, "Bursts turned down: %u too quiet, %u thumps. Last burst: peak %d dBFS, "
+		    "energy around %d Hz (claps need >= %d Hz)",
+		    clap.rejected_quiet, clap.rejected_thump,
+		    (int)lroundf(clap.last_burst_peak_dbfs), (int)lroundf(clap.last_burst_hz),
+		    DSP_CLAP_MIN_HZ);
 	if (blocks > 0) {
 		shell_fprintf(sh, SHELL_NORMAL, "  avg per stage:");
 		for (int i = 0; i < STAGE_COUNT; i++) {
@@ -549,11 +630,35 @@ static int cmd_mic_dump(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_mic_rec(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!atomic_get(&running)) {
+		shell_error(sh, "Microphone not running");
+		return -EIO;
+	}
+
+	int err = audio_rec_start();
+
+	if (err == -ENOTSUP) {
+		shell_error(sh, "No recorder in this build (build with rec.conf)");
+	} else if (err == -EBUSY) {
+		shell_error(sh, "Already recording");
+	} else {
+		shell_print(sh, "Recording %d s with the LED on, then GET /api/rec.wav",
+			    CONFIG_APP_AUDIO_REC_SECONDS);
+	}
+	return err;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(mic_cmds,
 	SHELL_CMD_ARG(start, NULL, "Start capturing: mic start [left|right]", cmd_mic_start, 1, 1),
 	SHELL_CMD(stop, NULL, "Stop capturing", cmd_mic_stop),
 	SHELL_CMD_ARG(level, NULL, "Live level meter: mic level [seconds]", cmd_mic_level, 1, 1),
 	SHELL_CMD(stats, NULL, "Driver counters and measured sample rate", cmd_mic_stats),
 	SHELL_CMD_ARG(dump, NULL, "Print raw samples: mic dump [n]", cmd_mic_dump, 1, 1),
+	SHELL_CMD(rec, NULL, "Record raw audio for /api/rec.wav (rec.conf builds)", cmd_mic_rec),
 	SHELL_SUBCMD_SET_END);
 SHELL_CMD_REGISTER(mic, &mic_cmds, "Microphone status", cmd_mic);

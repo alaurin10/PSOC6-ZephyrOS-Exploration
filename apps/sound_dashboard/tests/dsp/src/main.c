@@ -312,3 +312,38 @@ ZTEST(dsp, test_sensitivity)
 	run_clap(sig, RATE * 2, 1.0f, &singles, &doubles);
 	zassert_equal(singles, 1, "sensitive detector missed a quiet clap");
 }
+
+ZTEST(dsp, test_knock_is_not_a_clap)
+{
+	int singles, doubles;
+
+	/* A knock on the desk or the board: a loud 300 Hz thump that dies in ~10 ms. */
+	fill_noise(sig, RATE * 2, 0.002f);
+	for (size_t i = 0; i < RATE / 25; i++) {
+		float env = 0.5f * expf(-(float)i / (0.004f * RATE));
+
+		sig[RATE + i] += to_pcm(env * sinf(2.0f * PI * 300.0f * (float)i / RATE));
+	}
+	run_clap(sig, RATE * 2, 1.0f, &singles, &doubles);
+	zassert_equal(singles + doubles, 0);
+	zassert_equal(clap.rejected_thump, 1, "the knock was not judged as a burst");
+	zassert_within(clap.last_burst_hz, 300.0f, 100.0f, "%f Hz", (double)clap.last_burst_hz);
+}
+
+ZTEST(dsp, test_quiet_click_needs_high_sensitivity)
+{
+	int singles, doubles;
+
+	/* A keyboard click in a very quiet room: peak about -40 dBFS, 30 dB over the
+	 * background, so only its level tells it from a clap.
+	 */
+	fill_noise(sig, RATE * 2, 0.0002f);
+	add_clap(sig, RATE, 0.01f);
+	run_clap(sig, RATE * 2, 0.5f, &singles, &doubles);
+	zassert_equal(singles, 0, "a -40 dBFS click counted at sensitivity 0.5");
+	zassert_equal(clap.rejected_quiet, 1);
+
+	dsp_clap_init(&clap, RATE);
+	run_clap(sig, RATE * 2, 1.0f, &singles, &doubles);
+	zassert_equal(singles, 1, "sensitivity 1 should accept a -40 dBFS clap");
+}

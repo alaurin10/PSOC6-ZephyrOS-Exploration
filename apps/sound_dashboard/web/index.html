@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PSoC 6 Sound Dashboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>PSoC&nbsp;6 Sound Dashboard</h1>
+  <div class="badges">
+    <span id="ws-badge" class="badge off" title="Live connection to the board">offline</span>
+    <span id="net-badge" class="badge" title="The board's Wi-Fi">Wi-Fi</span>
+  </div>
+</header>
+
+<main>
+  <section class="visual card">
+    <div class="visual-head">
+      <div id="views" class="seg" role="group" aria-label="View"></div>
+      <span id="clip" class="pill" title="A sample hit full scale">CLIP</span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="spectrum" aria-label="Live spectrum"></canvas>
+      <div id="frozen" class="overlay hidden">FROZEN</div>
+      <div id="clap-flash" class="overlay clap hidden">CLAP</div>
+    </div>
+    <div id="axis" class="axis"></div>
+  </section>
+
+  <section class="tiles">
+    <div class="card tile">
+      <h2>Sound level</h2>
+      <div class="big"><span id="rms">--</span><small> dBFS</small></div>
+      <div class="sub">peak <span id="peak">--</span> dBFS</div>
+      <canvas id="level-graph" class="spark" aria-label="Level, last 30 s"></canvas>
+    </div>
+    <div class="card tile">
+      <h2>Temperature</h2>
+      <div class="big"><span id="temp">--</span><small> &deg;C</small></div>
+      <div class="sub">board thermistor</div>
+      <canvas id="temp-graph" class="spark" aria-label="Temperature, last 5 min"></canvas>
+    </div>
+    <div class="card tile">
+      <h2>CapSense</h2>
+      <div class="buttons">
+        <div id="b0" class="cs-btn" title="Next view">BTN0</div>
+        <div id="b1" class="cs-btn" title="Next colour, hold to freeze">BTN1</div>
+      </div>
+      <div class="cs-slider"><div id="cs-pos"></div></div>
+      <div class="sub">slider sets <b id="slider-target">-</b></div>
+    </div>
+    <div class="card tile">
+      <h2>Claps</h2>
+      <div class="big"><span id="claps">0</span></div>
+      <ul id="events" class="events"></ul>
+    </div>
+  </section>
+
+  <section class="card controls">
+    <h2>Controls</h2>
+    <div class="row"><label>Colour</label><div id="colours" class="swatches"></div></div>
+    <div class="row"><label for="p-gain">Gain</label><input id="p-gain" type="range" min="0" max="100"><output id="o-gain"></output></div>
+    <div class="row"><label for="p-smooth">Smoothing</label><input id="p-smooth" type="range" min="0" max="100"><output id="o-smooth"></output></div>
+    <div class="row"><label for="p-clap">Clap sensitivity</label><input id="p-clap" type="range" min="0" max="100"><output id="o-clap"></output></div>
+    <div class="row"><label>CapSense slider sets</label><div id="slider-sel" class="seg small"></div></div>
+    <div class="row toggles">
+      <label><input id="freeze" type="checkbox"> Freeze display</label>
+      <label><input id="ledclap" type="checkbox"> Flash LED on claps</label>
+    </div>
+    <div class="sub" id="last-change"></div>
+  </section>
+</main>
+
+<footer>Keys: <kbd>V</kbd> next view, <kbd>C</kbd> next colour, <kbd>F</kbd> freeze &middot;
+  <a href="/api/status">/api/status</a></footer>
+<script src="/app.js"></script>
+</body>
+</html>

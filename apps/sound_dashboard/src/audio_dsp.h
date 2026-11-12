@@ -96,10 +96,15 @@ enum dsp_clap_state {
 	CLAP_REFRACTORY, /* just detected one: ignore its tail */
 };
 
+/* A clap's energy must be centred at least this high (knocks are ~300-500 Hz). */
+#define DSP_CLAP_MIN_HZ 900
+
 struct dsp_clap {
+	uint32_t sample_rate;
 	uint32_t sub_len;        /* samples per analysis sub-frame (~8 ms) */
 	uint32_t sub_fill;
 	uint64_t sub_energy;     /* summed squared first differences (raw sample units) */
+	uint64_t sub_energy_raw; /* summed squared samples */
 	int32_t sub_peak;
 	int16_t prev_sample;
 	float prev_db;
@@ -108,16 +113,24 @@ struct dsp_clap {
 	uint32_t state_subs;     /* sub-frames spent in the current state */
 	float onset_peak_db;
 	int32_t onset_peak_sample;
+	uint64_t burst_energy;   /* sub_energy summed over the candidate burst */
+	uint64_t burst_energy_raw;
 	uint32_t subs_since_clap;
 	uint32_t subs_per_second;
 	float last_peak_dbfs;    /* peak sample level of the last detected clap */
+	/* The last short burst judged (clap or not), and how many were turned down. */
+	float last_burst_peak_dbfs;
+	float last_burst_hz;     /* RMS frequency: where the burst's energy is */
+	uint32_t rejected_quiet; /* peak below the sensitivity's level (clicks, typing) */
+	uint32_t rejected_thump; /* energy too low in frequency (knocks, taps on the board) */
 };
 
 void dsp_clap_init(struct dsp_clap *c, uint32_t sample_rate);
 
 /**
- * Feed n samples. sensitivity: 0 (only loud, sharp claps) .. 1 (quiet ones).
- * Returns the event detected in these samples, if any.
+ * Feed n samples. sensitivity: 0 (only loud, sharp claps) .. 1 (quiet ones);
+ * it sets both how far a burst must rise above the background and how loud
+ * its peak must be. Returns the event detected in these samples, if any.
  */
 enum dsp_clap_event dsp_clap_process(struct dsp_clap *c, const int16_t *x, size_t n,
 				     float sensitivity);

@@ -45,6 +45,16 @@ config APP_AUDIO_GAIN_DB
 	help
 	  Applied by the PDM-PCM converter in 1.5 dB steps.
 
+config APP_AUDIO_REC_SECONDS
+	int "Raw audio recorder length (s), 0 = no recorder"
+	default 0
+	range 0 20
+	help
+	  For tuning the analysis offline: "mic rec" records this many seconds
+	  of raw samples into RAM (32 KB per second at 16 kHz) with the user
+	  LED on, and GET /api/rec.wav downloads them as a WAV file. Enable it
+	  with the rec.conf fragment.
+
 endmenu
 
 source "Kconfig.zephyr"

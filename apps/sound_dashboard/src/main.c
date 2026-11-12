@@ -4,8 +4,10 @@
  * Modules (each one publishes or observes zbus channels, see channels.h):
  * - thermistor.c:     samples RT1 once per second, publishes temp_chan.
  * - capsense_input.c: buttons and slider, publishes input_chan and ctrl_chan.
- * - audio_capture.c:  PDM microphone stream (driver in ext/drivers/audio).
+ * - audio_capture.c:  PDM microphone stream and analysis (audio_dsp.c).
  * - ui_ctrl.c:        dashboard state machine, owns ui_chan.
+ * - wifi_mgr.c:       Wi-Fi from stored credentials, DHCP, SNTP; publishes net_chan.
+ * - web_server.c:     HTTP + WebSocket dashboard (pages in web/), mDNS.
  * - app_settings.c:   persisted UI state.
  * - app_watchdog.c:   hardware watchdog fed by a liveness supervisor.
  * - bus_monitor.c:    "bus" shell diagnostics.
@@ -23,6 +25,8 @@
 #include "capsense_input.h"
 #include "thermistor.h"
 #include "ui_ctrl.h"
+#include "web_server.h"
+#include "wifi_mgr.h"
 
 LOG_MODULE_REGISTER(sound_dashboard, LOG_LEVEL_INF);
 
@@ -54,7 +58,17 @@ int main(void)
 	capsense_input_start();
 	audio_capture_start();
 
-	LOG_INF("Started. Try 'ui', 'mic level', 'temp', 'capsense', 'bus watch on'.");
+	ret = wifi_mgr_start();
+	if (ret < 0) {
+		LOG_ERR("Wi-Fi manager failed (%d)", ret);
+	}
+
+	ret = web_server_start();
+	if (ret < 0) {
+		LOG_ERR("Web server failed (%d)", ret);
+	}
+
+	LOG_INF("Started. Try 'ui', 'audio', 'wifimgr', 'web', 'temp', 'capsense', 'bus watch on'.");
 
 	/* Returning from main() just ends the main thread; the others keep running. */
 	return 0;

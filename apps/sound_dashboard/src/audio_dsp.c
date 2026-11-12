@@ -198,7 +198,19 @@ float dsp_band_center_hz(const struct dsp_spectrum *s, int band)
  *     it up, and frozen while a burst is being judged);
  *  3. starts a candidate on a sharp rise well above the background, and
  *     confirms it only if the energy falls back by DECAY_DB within
- *     ONSET_MAX_MS. Longer bursts are treated as sustained sound.
+ *     ONSET_MAX_MS. Longer bursts are treated as sustained sound;
+ *  4. then judges the short burst. Recordings on this board (claps near and
+ *     at 2-3 m, snaps, typing, knocks on the desk, taps on the CapSense pads)
+ *     showed two things set claps apart:
+ *     - loudness: claps peaked at -32..0 dBFS, keyboard clicks and other
+ *       small noises at -36..-51, so the peak must reach a level set by the
+ *       sensitivity (ABS_PEAK_*);
+ *     - pitch: knocks and taps reach the microphone through the board as a
+ *       thump (RMS frequency 340..530 Hz), claps are at 1.4..2.8 kHz. The
+ *       RMS frequency comes almost free from the ratio of the differenced
+ *       to the raw energy: for a tone, E_diff / E_raw = 4 sin^2(pi f / fs).
+ *     Finger snaps sound just like claps to this microphone and are only
+ *     turned down when they are quieter.
  *
  * A second clap 100..700 ms after the first is reported as a double clap.
  */
@@ -207,6 +219,8 @@ float dsp_band_center_hz(const struct dsp_spectrum *s, int band)
 #define ABS_MIN_DB           (-70.0f) /* ignore anything quieter than this */
 #define THRESH_DB_MAX        30.0f   /* above background, at sensitivity 0 */
 #define THRESH_DB_MIN        10.0f   /* above background, at sensitivity 1 */
+#define ABS_PEAK_DBFS_MAX    (-20.0f) /* a clap's peak must reach this at sensitivity 0 */
+#define ABS_PEAK_DBFS_MIN    (-48.0f) /* ... and this at sensitivity 1 */
 #define DECAY_DB             12.0f
 #define ONSET_MAX_MS         56
 #define REFRACTORY_MS        100
@@ -224,6 +238,7 @@ static uint32_t ms_to_subs(const struct dsp_clap *c, uint32_t ms)
 void dsp_clap_init(struct dsp_clap *c, uint32_t sample_rate)
 {
 	memset(c, 0, sizeof(*c));
+	c->sample_rate = sample_rate;
 	c->sub_len = sample_rate / SUBFRAMES_PER_SECOND;
 	if (c->sub_len < 16) {
 		c->sub_len = 16;
@@ -234,12 +249,44 @@ void dsp_clap_init(struct dsp_clap *c, uint32_t sample_rate)
 	c->state = CLAP_IDLE;
 	c->subs_since_clap = UINT32_MAX / 2;
 	c->last_peak_dbfs = DSP_DB_MIN;
+	c->last_burst_peak_dbfs = DSP_DB_MIN;
 }
 
 static void set_state(struct dsp_clap *c, enum dsp_clap_state state)
 {
 	c->state = state;
 	c->state_subs = 0;
+}
+
+/* RMS frequency of the burst: fs / pi * asin(sqrt(E_diff / (4 E_raw))). */
+static float burst_hz(const struct dsp_clap *c)
+{
+	if (c->burst_energy_raw == 0) {
+		return 0.0f;
+	}
+
+	float r = (float)c->burst_energy / (4.0f * (float)c->burst_energy_raw);
+
+	return (float)c->sample_rate / 3.14159265f * asinf(sqrtf(clampf(r, 0.0f, 1.0f)));
+}
+
+/* A short burst has died away: is it a clap? */
+static bool burst_is_clap(struct dsp_clap *c, float sensitivity)
+{
+	float min_peak = ABS_PEAK_DBFS_MAX -
+			 (ABS_PEAK_DBFS_MAX - ABS_PEAK_DBFS_MIN) * clampf(sensitivity, 0, 1);
+
+	c->last_burst_peak_dbfs = dsp_db((float)c->onset_peak_sample / FULL_SCALE);
+	c->last_burst_hz = burst_hz(c);
+	if (c->last_burst_peak_dbfs < min_peak) {
+		c->rejected_quiet++;
+		return false;
+	}
+	if (c->last_burst_hz < (float)DSP_CLAP_MIN_HZ) {
+		c->rejected_thump++;
+		return false;
+	}
+	return true;
 }
 
 static enum dsp_clap_event clap_subframe(struct dsp_clap *c, float sensitivity)
@@ -260,6 +307,8 @@ static enum dsp_clap_event clap_subframe(struct dsp_clap *c, float sensitivity)
 			set_state(c, CLAP_ONSET);
 			c->onset_peak_db = db;
 			c->onset_peak_sample = c->sub_peak;
+			c->burst_energy = c->sub_energy;
+			c->burst_energy_raw = c->sub_energy_raw;
 		} else {
 			c->floor_db += (db - c->floor_db) * (db < c->floor_db ? FLOOR_DOWN : FLOOR_UP);
 		}
@@ -273,17 +322,25 @@ static enum dsp_clap_event clap_subframe(struct dsp_clap *c, float sensitivity)
 			c->onset_peak_sample = c->sub_peak;
 		}
 		if (db < c->onset_peak_db - DECAY_DB) {
-			/* A short burst that died away: a clap. */
+			/* A short burst that died away: a clap, unless too quiet or a thump. */
+			if (!burst_is_clap(c, sensitivity)) {
+				set_state(c, CLAP_REFRACTORY);
+				break;
+			}
+
 			bool pair = c->subs_since_clap >= ms_to_subs(c, DOUBLE_MIN_MS) &&
 				    c->subs_since_clap <= ms_to_subs(c, DOUBLE_MAX_MS);
 
 			ev = pair ? DSP_CLAP_DOUBLE : DSP_CLAP_SINGLE;
 			/* After a pair, a third clap starts a new one. */
 			c->subs_since_clap = pair ? UINT32_MAX / 2 : 0;
-			c->last_peak_dbfs = dsp_db((float)c->onset_peak_sample / FULL_SCALE);
+			c->last_peak_dbfs = c->last_burst_peak_dbfs;
 			set_state(c, CLAP_REFRACTORY);
 		} else if (c->state_subs > ms_to_subs(c, ONSET_MAX_MS)) {
 			set_state(c, CLAP_SUSTAINED);
+		} else {
+			c->burst_energy += c->sub_energy;
+			c->burst_energy_raw += c->sub_energy_raw;
 		}
 		break;
 
@@ -320,6 +377,7 @@ enum dsp_clap_event dsp_clap_process(struct dsp_clap *c, const int16_t *x, size_
 		c->prev_sample = x[i];
 		/* |d| <= 65535, so d^2 always fits unsigned 32 bits. */
 		c->sub_energy += (uint32_t)d * (uint32_t)d;
+		c->sub_energy_raw += (uint32_t)(a * a);
 		if (a > c->sub_peak) {
 			c->sub_peak = a;
 		}
@@ -332,6 +390,7 @@ enum dsp_clap_event dsp_clap_process(struct dsp_clap *c, const int16_t *x, size_
 			}
 			c->sub_fill = 0;
 			c->sub_energy = 0;
+			c->sub_energy_raw = 0;
 			c->sub_peak = 0;
 		}
 	}

@@ -28,7 +28,23 @@ target_sources(app PRIVATE
   src/ui_ctrl.c
   src/audio_capture.c
   src/audio_dsp.c
+  src/app_time.c
+  src/wifi_mgr.c
+  src/web_server.c
 )
+
+# ---- Web dashboard ------------------------------------------------------------
+# The page, script and stylesheet are gzipped at build time into C arrays that
+# the HTTP server serves as-is (Content-Encoding: gzip).
+set(gen_dir ${ZEPHYR_BINARY_DIR}/include/generated)
+foreach(web_file index.html app.js style.css)
+  generate_inc_file_for_target(app web/${web_file} ${gen_dir}/${web_file}.gz.inc --gzip)
+endforeach()
+
+# The HTTP server finds the service's resources in an iterable linker section.
+zephyr_linker_sources(SECTIONS sections-rom.ld)
+zephyr_linker_section(NAME http_resource_desc_dash_service
+  KVMA RAM_REGION GROUP RODATA_REGION)
 
 # ---- CapSense -----------------------------------------------------------------
 # Infineon CapSense middleware (Infineon EULA, not committed), plus the
