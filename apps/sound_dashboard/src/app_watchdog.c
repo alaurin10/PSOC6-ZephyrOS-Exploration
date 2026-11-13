@@ -40,6 +40,44 @@ static __noinit struct {
 	uint32_t mask;
 } stall_record;
 
+/* This boot's reset cause, kept after the hardware register is cleared. */
+static uint32_t boot_reason;
+static uint32_t boot_stalled;
+
+int app_watchdog_reset_cause_str(char *buf, size_t len)
+{
+	static const struct {
+		uint32_t bit;
+		const char *name;
+	} causes[] = {
+		{CY_SYSLIB_RESET_HWWDT, "watchdog"},
+		{CY_SYSLIB_RESET_ACT_FAULT, "fault"},
+		{CY_SYSLIB_RESET_DPSLP_FAULT, "deep-sleep fault"},
+		{CY_SYSLIB_RESET_SOFT, "software"},
+		{CY_SYSLIB_RESET_SWWDT0 | CY_SYSLIB_RESET_SWWDT1 | CY_SYSLIB_RESET_SWWDT2 |
+			 CY_SYSLIB_RESET_SWWDT3,
+		 "multi-counter watchdog"},
+		{CY_SYSLIB_RESET_HIB_WAKEUP, "hibernate wakeup"},
+	};
+	int n = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(causes); i++) {
+		if (boot_reason & causes[i].bit) {
+			n += snprintk(buf + n, len - n, "%s%s", n ? "+" : "", causes[i].name);
+		}
+	}
+	if (n == 0) {
+		/* The cause register stays empty after a power-on or the reset pin. */
+		n = snprintk(buf, len, "power-on or reset pin");
+	}
+	for (int i = 0; i < WDT_CLIENT_COUNT; i++) {
+		if (boot_stalled & BIT(i)) {
+			n += snprintk(buf + n, len - n, " (%s stalled)", client_names[i]);
+		}
+	}
+	return n;
+}
+
 void app_watchdog_report_reset_cause(void)
 {
 	/* Zephyr's hwinfo reset-cause API isn't implemented for PSoC 6 in this tree,
@@ -47,9 +85,11 @@ void app_watchdog_report_reset_cause(void)
 	 */
 	uint32_t reason = Cy_SysLib_GetResetReason();
 
+	boot_reason = reason;
 	if (reason & CY_SYSLIB_RESET_HWWDT) {
 		LOG_WRN("Last reset was caused by the WATCHDOG");
 		if (stall_record.magic == STALL_MAGIC) {
+			boot_stalled = stall_record.mask;
 			for (int i = 0; i < WDT_CLIENT_COUNT; i++) {
 				if (stall_record.mask & BIT(i)) {
 					LOG_WRN("  stalled thread: %s", client_names[i]);

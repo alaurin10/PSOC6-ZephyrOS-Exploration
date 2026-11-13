@@ -25,8 +25,10 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/data/json.h>
+#include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/dns_sd.h>
@@ -42,6 +44,7 @@
 #include "app_watchdog.h"
 #include "audio_capture.h"
 #include "channels.h"
+#include "datalog.h"
 #include "ui_ctrl.h"
 #include "web_server.h"
 
@@ -91,10 +94,6 @@ STATIC_GZ(style_css_detail, style_css_gz, "text/css");
 
 /* ---- JSON helpers -------------------------------------------------------------------- */
 
-static const char *const source_names[] = {"boot", "capsense", "web", "shell"};
-static const char *const net_names[] = {"idle", "connecting", "connected", "online"};
-static const char *const event_names[] = {"", "clap", "double", "clip"};
-
 /* Append a string with JSON escaping (SSIDs can contain anything). */
 static int json_str(char *buf, size_t len, const char *s)
 {
@@ -134,7 +133,7 @@ static int fmt_ui(char *buf, size_t len)
 			m.led_on_clap, ui_param_names[m.slider_param % UI_PARAM_COUNT],
 			ui_param_names[0], m.param[0], ui_param_names[1], m.param[1],
 			ui_param_names[2], m.param[2],
-			source_names[m.source % ARRAY_SIZE(source_names)]);
+			ctrl_source_names[m.source % CTRL_SRC_COUNT]);
 }
 
 static int fmt_input(char *buf, size_t len)
@@ -153,7 +152,7 @@ static int fmt_net(char *buf, size_t len)
 
 	(void)zbus_chan_read(&net_chan, &m, K_MSEC(50));
 	n = snprintk(buf, len, "{\"t\":\"net\",\"state\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"ssid\":",
-		     net_names[m.state % ARRAY_SIZE(net_names)], m.rssi, m.ipv4);
+		     net_state_names[m.state % NET_STATE_COUNT], m.rssi, m.ipv4);
 	n += json_str(buf + n, len - n, m.ssid);
 	n += snprintk(buf + n, len - n, "}");
 	return n;
@@ -168,7 +167,7 @@ static int fmt_event(char *buf, size_t len)
 		return 0;
 	}
 	return snprintk(buf, len, "{\"t\":\"ev\",\"n\":%u,\"e\":\"%s\",\"p\":%d}", m.seq,
-			event_names[m.type % ARRAY_SIZE(event_names)], m.peak_cdb);
+			audio_event_names[m.type % AUDIO_EVT_COUNT], m.peak_cdb);
 }
 
 /* Spectrum frame, with the latest level: the browser's main animation tick. */
@@ -642,6 +641,184 @@ static struct http_resource_detail_dynamic status_detail = {
 	.cb = status_handler,
 };
 
+/* ---- /api/logs and /api/log: the data log ------------------------------------------ */
+
+/* Value of `key` in a query string like "?file=log00001.csv&tail=10". */
+static bool query_param(const uint8_t *q, size_t len, const char *key, char *out, size_t out_len)
+{
+	size_t key_len = strlen(key);
+	size_t i = (len > 0 && q[0] == '?') ? 1 : 0;
+
+	while (i < len) {
+		size_t end = i;
+
+		while (end < len && q[end] != '&') {
+			end++;
+		}
+		if (end - i > key_len && memcmp(q + i, key, key_len) == 0 && q[i + key_len] == '=') {
+			size_t n = MIN(end - i - key_len - 1, out_len - 1);
+
+			memcpy(out, q + i + key_len + 1, n);
+			out[n] = '\0';
+			return true;
+		}
+		i = end + 1;
+	}
+	return false;
+}
+
+/* {"mounted":true,"current":"log00003.csv","free_kb":..,"total_kb":..,"sync_s":10,
+ *  "files":[{"name":"log00001.csv","size":1048620},...]}
+ */
+static int logs_handler(struct http_client_ctx *client, enum http_transaction_status status,
+			const struct http_request_ctx *request_ctx,
+			struct http_response_ctx *response_ctx, void *user_data)
+{
+	ARG_UNUSED(client);
+	ARG_UNUSED(request_ctx);
+	ARG_UNUSED(user_data);
+
+	static char body[768];
+	struct datalog_file files[CONFIG_APP_DATALOG_FILES + 2];
+	struct datalog_stats st;
+	int n_files;
+	int n;
+
+	if (status != HTTP_SERVER_REQUEST_DATA_FINAL) {
+		return 0;
+	}
+
+	datalog_get_stats(&st);
+	n_files = datalog_list(files, ARRAY_SIZE(files));
+	n = snprintk(body, sizeof(body),
+		     "{\"mounted\":%s,\"current\":\"%s\",\"free_kb\":%u,\"total_kb\":%u,"
+		     "\"sync_s\":%d,\"files\":[",
+		     st.mounted ? "true" : "false", st.current, (uint32_t)(st.free_bytes / 1024),
+		     (uint32_t)(st.total_bytes / 1024), CONFIG_APP_DATALOG_SYNC_S);
+	for (int i = 0; i < n_files; i++) {
+		n += snprintk(body + n, sizeof(body) - n, "%s{\"name\":\"%s\",\"size\":%u}",
+			      i ? "," : "", files[i].name, files[i].size);
+	}
+	n += snprintk(body + n, sizeof(body) - n, "]}");
+
+	response_ctx->body = (const uint8_t *)body;
+	response_ctx->body_len = MIN(n, (int)sizeof(body) - 1);
+	response_ctx->final_chunk = true;
+	return 0;
+}
+
+/*
+ * GET /api/log?file=log00001.csv: the whole file, streamed in chunks.
+ * GET /api/log?tail=N: the last N lines of the file being written.
+ * The server lets one client at a time use a dynamic resource, so one set
+ * of statics is enough.
+ */
+static struct fs_file_t dl_file;
+static bool dl_open;
+static char dl_buf[1536];
+
+static void dl_close(void)
+{
+	if (dl_open) {
+		fs_close(&dl_file);
+		dl_open = false;
+	}
+}
+
+static int log_reply(struct http_response_ctx *rsp, enum http_status code, const char *text)
+{
+	rsp->status = code;
+	rsp->body = (const uint8_t *)text;
+	rsp->body_len = strlen(text);
+	rsp->final_chunk = true;
+	return 0;
+}
+
+static int log_handler(struct http_client_ctx *client, enum http_transaction_status status,
+		       const struct http_request_ctx *request_ctx,
+		       struct http_response_ctx *response_ctx, void *user_data)
+{
+	ARG_UNUSED(client);
+	ARG_UNUSED(user_data);
+
+	ssize_t n;
+
+	if (status == HTTP_SERVER_TRANSACTION_ABORTED ||
+	    status == HTTP_SERVER_TRANSACTION_COMPLETE) {
+		dl_close();
+		return 0;
+	}
+	if (status != HTTP_SERVER_REQUEST_DATA_FINAL) {
+		return 0;
+	}
+
+	if (!dl_open) {
+		char name[DATALOG_NAME_LEN] = "";
+		char path[32];
+		char tail[8];
+		struct datalog_stats st;
+
+		if (query_param(request_ctx->data, request_ctx->data_len, "tail", tail,
+				sizeof(tail))) {
+			int len = datalog_tail(dl_buf, sizeof(dl_buf), CLAMP(atoi(tail), 1, 40),
+					       false);
+
+			if (len < 0) {
+				return log_reply(response_ctx, HTTP_503_SERVICE_UNAVAILABLE,
+						 "The data log isn't available\n");
+			}
+			response_ctx->body = (const uint8_t *)dl_buf;
+			response_ctx->body_len = len;
+			response_ctx->final_chunk = true;
+			return 0;
+		}
+
+		(void)query_param(request_ctx->data, request_ctx->data_len, "file", name,
+				  sizeof(name));
+		if (datalog_path(name, path, sizeof(path)) < 0) {
+			return log_reply(response_ctx, HTTP_404_NOT_FOUND,
+					 "Use /api/log?file=logNNNNN.csv (see /api/logs)\n");
+		}
+		/* The file being written: include everything logged so far. */
+		datalog_get_stats(&st);
+		if (strcmp(name, st.current) == 0) {
+			(void)datalog_flush(5000);
+		}
+		fs_file_t_init(&dl_file);
+		if (fs_open(&dl_file, path, FS_O_READ) < 0) {
+			return log_reply(response_ctx, HTTP_404_NOT_FOUND, "No such log file\n");
+		}
+		dl_open = true;
+	}
+
+	n = fs_read(&dl_file, dl_buf, sizeof(dl_buf));
+	response_ctx->body = (const uint8_t *)dl_buf;
+	response_ctx->body_len = MAX(n, 0);
+	response_ctx->final_chunk = n < (ssize_t)sizeof(dl_buf);
+	if (response_ctx->final_chunk) {
+		dl_close();
+	}
+	return 0;
+}
+
+static struct http_resource_detail_dynamic logs_detail = {
+	.common = {
+		.type = HTTP_RESOURCE_TYPE_DYNAMIC,
+		.bitmask_of_supported_http_methods = BIT(HTTP_GET),
+		.content_type = "application/json",
+	},
+	.cb = logs_handler,
+};
+
+static struct http_resource_detail_dynamic log_detail = {
+	.common = {
+		.type = HTTP_RESOURCE_TYPE_DYNAMIC,
+		.bitmask_of_supported_http_methods = BIT(HTTP_GET),
+		.content_type = "text/csv",
+	},
+	.cb = log_handler,
+};
+
 /* ---- /api/rec.wav: the raw recording (CONFIG_APP_AUDIO_REC_SECONDS > 0) ------------- */
 
 #if CONFIG_APP_AUDIO_REC_SECONDS > 0
@@ -755,6 +932,8 @@ HTTP_RESOURCE_DEFINE(index_res, dash_service, "/", &index_detail);
 HTTP_RESOURCE_DEFINE(app_js_res, dash_service, "/app.js", &app_js_detail);
 HTTP_RESOURCE_DEFINE(style_css_res, dash_service, "/style.css", &style_css_detail);
 HTTP_RESOURCE_DEFINE(status_res, dash_service, "/api/status", &status_detail);
+HTTP_RESOURCE_DEFINE(logs_res, dash_service, "/api/logs", &logs_detail);
+HTTP_RESOURCE_DEFINE(log_res, dash_service, "/api/log", &log_detail);
 #if CONFIG_APP_AUDIO_REC_SECONDS > 0
 HTTP_RESOURCE_DEFINE(rec_res, dash_service, "/api/rec.wav", &rec_detail);
 #endif

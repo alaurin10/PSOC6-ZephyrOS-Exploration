@@ -8,6 +8,11 @@
 
 #include "channels.h"
 
+const char *const audio_event_names[AUDIO_EVT_COUNT] = {"", "clap", "double", "clip"};
+const char *const ctrl_source_names[CTRL_SRC_COUNT] = {"boot", "capsense", "web", "shell"};
+const char *const net_state_names[NET_STATE_COUNT] = {"idle", "connecting", "connected",
+						      "online"};
+
 #define TEMP_MIN_PLAUSIBLE_CENTI (-4000)
 #define TEMP_MAX_PLAUSIBLE_CENTI 12500
 

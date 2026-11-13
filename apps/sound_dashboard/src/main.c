@@ -8,6 +8,7 @@
  * - ui_ctrl.c:        dashboard state machine, owns ui_chan.
  * - wifi_mgr.c:       Wi-Fi from stored credentials, DHCP, SNTP; publishes net_chan.
  * - web_server.c:     HTTP + WebSocket dashboard (pages in web/), mDNS.
+ * - datalog.c:        CSV log on the QSPI flash (LittleFS), observes most channels.
  * - app_settings.c:   persisted UI state.
  * - app_watchdog.c:   hardware watchdog fed by a liveness supervisor.
  * - bus_monitor.c:    "bus" shell diagnostics.
@@ -23,6 +24,7 @@
 #include "app_watchdog.h"
 #include "audio_capture.h"
 #include "capsense_input.h"
+#include "datalog.h"
 #include "thermistor.h"
 #include "ui_ctrl.h"
 #include "web_server.h"
@@ -57,6 +59,7 @@ int main(void)
 
 	capsense_input_start();
 	audio_capture_start();
+	datalog_start();
 
 	ret = wifi_mgr_start();
 	if (ret < 0) {
@@ -68,7 +71,8 @@ int main(void)
 		LOG_ERR("Web server failed (%d)", ret);
 	}
 
-	LOG_INF("Started. Try 'ui', 'audio', 'wifimgr', 'web', 'temp', 'capsense', 'bus watch on'.");
+	LOG_INF("Started. Try 'ui', 'audio', 'datalog', 'wifimgr', 'web', 'temp', 'capsense', "
+		"'bus watch on'.");
 
 	/* Returning from main() just ends the main thread; the others keep running. */
 	return 0;

@@ -3,8 +3,8 @@
 A Zephyr RTOS app for the CY8CPROTO-062-4343W. The board listens through its PDM
 microphone, computes the sound level and an FFT spectrum, detects claps, and serves a live
 dashboard over Wi-Fi. The dashboard also shows the temperature and the CAPSENSE buttons and
-slider, which (like the browser) control what the dashboard shows. Data is logged to the
-QSPI flash.
+slider, which (like the browser) control what the dashboard shows. Everything is logged to
+the QSPI flash as CSV.
 
 It builds on [Thermo-Blinky](../rtos_blinky): the thermistor and CapSense code is copied
 from there and adapted, and the modules talk through zbus channels in the same way.
@@ -18,7 +18,7 @@ from there and adapted, and the modules talk through zbus channels in the same w
 > | M2 Audio DSP: level, FFT, clap detection | ✅ |
 > | M3 Wi-Fi, web dashboard, mDNS | ✅ |
 > | M4 CapSense and browser controls | ✅ |
-> | M5 QSPI flash logging (custom SMIF driver, LittleFS) | ⏳ |
+> | M5 QSPI flash logging (custom SMIF driver, LittleFS) | ✅ |
 > | M6 Dual core: audio on the Cortex-M0+ | ⏳ |
 
 ## Architecture
@@ -72,11 +72,12 @@ sensitivity, which parameter the slider sets, and flashing the LED on a clap.
 | [`web_server.c`](src/web_server.c) | HTTP server and WebSocket: serves the page, streams every channel to the browsers, turns their commands into `ctrl_chan` messages |
 | [`web/`](web) | The dashboard page (HTML, CSS, JavaScript), gzipped into the firmware at build time |
 | [`app_time.c`](src/app_time.c) | Wall-clock time from SNTP, uptime until it's set |
+| [`datalog.c`](src/datalog.c) | CSV data log on the QSPI flash (LittleFS): a line per second plus events, rotating files, `datalog` shell |
 | [`app_settings.c`](src/app_settings.c) | Persisted UI state (Settings on ZMS, `dash/` keys), saved 2 s after the last change on a low-priority work queue |
 | [`app_watchdog.c`](src/app_watchdog.c) | Hardware watchdog fed by a supervisor only while every key thread checks in; names the stalled thread after a watchdog reset |
 | [`bus_monitor.c`](src/bus_monitor.c) | `bus` shell diagnostics |
-| [`ext/`](ext) | Repo-local Zephyr module: the PSoC 6 PDM microphone driver and its devicetree binding |
-| [`boards/cy8cproto_062_4343w.overlay`](boards/cy8cproto_062_4343w.overlay) | Audio clock (PLL0 → CLK_HF1), PDM pins and node, thermistor, settings partition |
+| [`ext/`](ext) | Repo-local Zephyr module: the PSoC 6 PDM microphone and SMIF flash drivers and their devicetree bindings |
+| [`boards/cy8cproto_062_4343w.overlay`](boards/cy8cproto_062_4343w.overlay) | Audio clock (PLL0 → CLK_HF1), PDM pins and node, thermistor, settings partition, SMIF clock (CLK_HF2), pins and QSPI flash node with the log partition |
 
 Settings (the dashboard state and the stored Wi-Fi network) live in a 128 KB flash
 partition at 0x1D8000, separate from the 32 KB rtos_blinky uses at the end of flash. This
@@ -204,6 +205,8 @@ prints where to find the dashboard:
   <kbd>C</kbd> next colour, <kbd>F</kbd> freeze.
 - Every control sends a command to the board, and the page only changes when the board's
   new state comes back. So every open page, the CapSense buttons and the shell always agree.
+- **Data log:** the log files with download links, free space, and the latest lines
+  (refreshed every 10 s).
 - Plain HTML, CSS and JavaScript drawing on `<canvas>`, no libraries: 8 KB gzipped in the
   firmware.
 
@@ -224,6 +227,9 @@ its settings. Use it on a network you trust.
 | `/`, `/app.js`, `/style.css` | The page (gzip) |
 | `/api/status` | A JSON snapshot: uptime, time, and the latest `ui`, `net`, `temp`, `in` and frame messages |
 | `/ws` | WebSocket, JSON text messages both ways |
+| `/api/logs` | The [data log](#data-log) files: names, sizes, the one being written, free space |
+| `/api/log?file=log00042.csv` | Download a log file (CSV, streamed); the current one is synced first |
+| `/api/log?tail=N` | The last N (≤ 40) lines of the current log file, as last synced |
 | `/api/rec.wav` | The last raw recording ([tuning build](#tuning-build-raw-audio-recorder) only) |
 
 Board → browser, each with a `"t"` type:
@@ -253,6 +259,86 @@ Browser → board (checked against an allow-list and the allowed ranges, then pu
 The server is Zephyr's HTTP server with HTTP/1.1 only: browsers use HTTP/2 only over TLS,
 and WebSockets start from HTTP/1.1 anyway.
 
+## Data log
+
+The board logs to its 64 MB QSPI flash: one CSV line per second, plus a line per event.
+The dashboard's **Data log** panel lists the files with download links and shows the
+latest lines. The shell has `datalog`, and the web API has [`/api/logs` and
+`/api/log`](#http-and-websocket-api).
+
+```text
+time,uptime_s,kind,temp_c,rms_dbfs,peak_dbfs,claps,detail
+2026-11-13T18:56:48.490Z,42.802,sample,23.24,-59.8,-50.1,0,
+2026-11-13T18:56:48.524Z,42.836,clap,,,-12.3,,
+2026-11-13T18:56:49.490Z,43.802,ui,,,,,"view=line colour=0 freeze=0 ledclap=1 slider=gain gain=69 smooth=60 clap=50 src=capsense"
+```
+
+| `kind` | When | Columns |
+|---|---|---|
+| `sample` | Every second | Temperature, the sound level over that second (RMS, power-averaged, and peak), claps in it |
+| `clap`, `double`, `clip` | On the event | Peak level |
+| `ui` | After a dashboard change, at most once a second | The new state and who changed it |
+| `wifi` | Connection changes | State, address, signal, network |
+| `boot` | At startup | Reset cause, e.g. `watchdog (datalog stalled)` |
+| `clock` | When SNTP sets the clock | |
+| `note` | `datalog note <text>` | The text, e.g. to mark a test step |
+
+`time` is UTC once SNTP has set the clock and empty before that; `uptime_s` is always
+there. Files are `log00001.csv`, `log00002.csv`, ...; a new one starts every 1 MB (about
+4.5 hours), and the oldest are deleted to keep 8 (about 36 hours). Lines are buffered in
+RAM and committed every 10 s, so a power cut loses at most the last 10 s. File size, count
+and sync interval are Kconfig options (`CONFIG_APP_DATALOG_*`).
+
+`temp_c` is one thermistor reading per second, which currently jumps by about ±2 °C from
+second to second. The firmware from before the data log shows the same noise, so it's
+interference on the thermistor's single ADC conversions, not the logging. It was worst with
+the Wi-Fi signal at -92 dBm. Average a few rows when analysing.
+
+- **Collecting never waits for the flash.** zbus listeners and a 1 s timer only put
+  records in a queue. A low-priority writer thread formats and writes them, so a slow flash
+  operation (a 256 KB sector erase takes up to 3 s) never holds up audio, CapSense or the
+  web.
+- **LittleFS** on a 16 MB partition. The flash erases in 256 KB blocks, so the app mounts
+  LittleFS itself to cap its metadata logs at 32 KB (`metadata_max`); otherwise they'd
+  grow to 256 KB, and LittleFS rescans them on every open and sync.
+- **Watchdog:** a single erase can outlast a 1 s check-in, so the 1 s timer checks in for
+  the writer while it waits for records, or while it's inside a file operation shorter than
+  15 s. A file operation that really hangs still resets the board.
+- **Power loss:** LittleFS commits atomically, so after a power cut the file ends at the
+  last sync. Tested with 9 USB unplugs at random moments while syncing every second: the
+  file system mounted every time (in ~40 ms) with no repair or reformat, every file ended
+  on a complete line, and each power-up left its `boot` line.
+- With logging running and syncing every second: 0 dropped audio blocks, and audio analysis
+  stayed under 5 ms per block, even with 145 log downloads a minute. A single 58 ms delay
+  was seen once, in a boot where Wi-Fi took several tries to join. It wasn't reproduced and
+  dropped no audio.
+
+### QSPI flash driver
+
+Zephyr's PSoC 6 support has no driver for the SMIF (serial memory interface) the QSPI
+flash is on. Its `infineon,qspi-flash` driver needs a memory configuration from the board
+and leaves the pins to vendor startup code, which PSoC 6 boards in Zephyr don't have. So
+[`ext/drivers/flash/flash_psoc6_smif.c`](ext/drivers/flash/flash_psoc6_smif.c) implements
+the Zephyr flash API on the PDL's SMIF driver:
+
+- **The memory describes itself.** At boot the PDL reads the memory's SFDP tables
+  (JESD216): commands, 3- or 4-byte addresses, page and sector sizes and timings, so no
+  hand-written memory configuration is needed. On this kit it finds the S25FL512S: JEDEC ID
+  `01 02 20`, 64 MB, 4-byte addresses, 256 KB sectors, quad I/O read (0xEC, 1-4-4) and
+  quad page program (0x34).
+- **Four data lines** when the memory's non-volatile Quad Enable bit is set (it is on this
+  kit). Otherwise the driver uses one line, unless the devicetree's `quad-enable` allows
+  it to set the bit.
+- Reads and page programs use the PDL's blocking calls. Sector erases send the command and
+  sleep between status polls, so other threads run during the erase.
+- A reset in the middle of an erase doesn't stop the memory, which then ignores commands
+  for a while. At boot the driver waits for its busy bit to clear first. Tested by resetting
+  the MCU mid-erase: it waited 123 ms, then started normally.
+- The SMIF runs from CLK_HF2: the 100 MHz FLL divided by 2.
+
+The `flash` shell (`flash read/write/erase qspi-flash@40420000 ...`) and the `fs` shell
+(`fs ls /lfs`, `fs read /lfs/log00001.csv`) work on it too.
+
 ## Shell
 
 Open the KitProg3 serial port at 115200 8N1:
@@ -269,6 +355,10 @@ Open the KitProg3 serial port at 115200 8N1:
 | `wifimgr add "<SSID>" "<passphrase>"` | Store a WPA2 network and connect (other SSID bytes as `\xHH`) |
 | `wifi ...` | Zephyr's Wi-Fi shell: `wifi scan`, `wifi status`, `wifi cred list\|delete`, ... |
 | `web` | Dashboard address; per open page: frames sent and dropped, commands |
+| `datalog` | Data log status: free space, current file, lines and bytes since boot, drops, errors, longest write |
+| `datalog list`, `datalog tail [n]` | Log files and sizes; the last n lines (written to flash first) |
+| `datalog note <text>`, `datalog sync`, `datalog clear` | Log a note; commit the buffered lines now; delete every log file |
+| `flash ...`, `fs ...` | Zephyr's flash and file-system shells, e.g. `fs ls /lfs` |
 | `ui` | Dashboard state: view, colour, parameters, what the slider sets |
 | `ui view next\|bars\|line\|waterfall\|level` | Change the view |
 | `ui colour next\|<n>`, `ui freeze [on\|off]` | Colour scheme, freeze |
@@ -330,6 +420,7 @@ and print the results on the serial console. (`testcase.yaml` also lists QEMU ta
 the Zephyr SDK's Windows QEMU needs a MinGW runtime DLL, `libgcc_s_seh-1.dll`, that it
 doesn't ship.)
 
-**Footprint (M3/M4):** ~930 KB flash, ~241 KB RAM; most of it is the Wi-Fi driver and
+**Footprint (M5):** ~981 KB flash, ~271 KB RAM; most of it is the Wi-Fi driver and
 firmware, the network stack and the HTTP server (M2, before Wi-Fi: ~182 KB flash, ~87 KB
-RAM).
+RAM). The data log (QSPI driver, LittleFS, logger and the flash and file-system shells)
+adds ~51 KB flash and ~30 KB RAM.

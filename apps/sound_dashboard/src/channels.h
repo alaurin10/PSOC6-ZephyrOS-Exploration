@@ -73,7 +73,11 @@ enum audio_event_type {
 	AUDIO_EVT_CLAP = 1,
 	AUDIO_EVT_DOUBLE_CLAP,
 	AUDIO_EVT_CLIP,
+	AUDIO_EVT_COUNT,
 };
+
+/* "clap", "double", "clip" (index 0 is empty). */
+extern const char *const audio_event_names[AUDIO_EVT_COUNT];
 
 struct audio_event_msg {
 	uint32_t seq;
@@ -103,7 +107,11 @@ enum ctrl_source {
 	CTRL_SRC_CAPSENSE,
 	CTRL_SRC_WEB,
 	CTRL_SRC_SHELL,
+	CTRL_SRC_COUNT,
 };
+
+/* "boot", "capsense", "web", "shell" */
+extern const char *const ctrl_source_names[CTRL_SRC_COUNT];
 
 enum ctrl_cmd {
 	CTRL_VIEW_NEXT,       /* value unused */
@@ -174,7 +182,11 @@ enum net_state {
 	NET_STATE_CONNECTING,
 	NET_STATE_CONNECTED,  /* associated, waiting for an address */
 	NET_STATE_ONLINE,     /* has an IPv4 address */
+	NET_STATE_COUNT,
 };
+
+/* "idle", "connecting", "connected", "online" */
+extern const char *const net_state_names[NET_STATE_COUNT];
 
 struct net_msg {
 	uint8_t state;        /* enum net_state */

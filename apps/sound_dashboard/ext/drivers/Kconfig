@@ -1,3 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 rsource "audio/Kconfig"
+rsource "flash/Kconfig"

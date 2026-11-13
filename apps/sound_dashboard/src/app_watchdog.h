@@ -12,6 +12,8 @@
 #ifndef APP_WATCHDOG_H_
 #define APP_WATCHDOG_H_
 
+#include <stddef.h>
+
 #define APP_WDT_TIMEOUT_MS 4000
 /* How often the supervisor checks. Clients must check in at least this often. */
 #define APP_WDT_CHECK_MS   1000
@@ -27,6 +29,12 @@ enum app_wdt_client {
 
 /** Log why the chip last reset (and which client stalled, if any), then clear it. */
 void app_watchdog_report_reset_cause(void);
+
+/**
+ * This boot's reset cause as text, e.g. "watchdog (datalog stalled)" or
+ * "power-on or reset pin". Valid after app_watchdog_report_reset_cause().
+ */
+int app_watchdog_reset_cause_str(char *buf, size_t len);
 
 /**
  * Start the supervisor, and the hardware watchdog unless a debugger has

@@ -31,6 +31,7 @@ target_sources(app PRIVATE
   src/app_time.c
   src/wifi_mgr.c
   src/web_server.c
+  src/datalog.c
 )
 
 # ---- Web dashboard ------------------------------------------------------------

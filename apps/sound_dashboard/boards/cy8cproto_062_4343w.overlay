@@ -14,6 +14,9 @@
  *
  * - A flash partition for persistent settings (UI state, Wi-Fi credentials).
  *
+ * - The 64 MB QSPI NOR flash (S25FL512S) on the SMIF, for the data log
+ *   (driver in ext/drivers/flash).
+ *
  * P0.4 is both the SW0 button and the Wi-Fi host-wake interrupt line in the
  * board devicetree. The AIROC Wi-Fi driver owns it, so this app never uses SW0.
  *
@@ -55,6 +58,32 @@
 			pinctrl-names = "default";
 			status = "okay";
 		};
+
+		/* SMIF serial memory interface with the kit's QSPI NOR flash
+		 * (not in the SoC devicetree). The memory describes itself (SFDP).
+		 */
+		qspi_flash: qspi-flash@40420000 {
+			compatible = "infineon,cat1a-smif-nor";
+			reg = <0x40420000 0x10000>;
+			clocks = <&clk_hf2>;
+			pinctrl-0 = <&p11_2_smif_ss0 &p11_3_smif_d3 &p11_4_smif_d2
+				     &p11_5_smif_d1 &p11_6_smif_d0 &p11_7_smif_clk>;
+			pinctrl-names = "default";
+			flash-size = <DT_SIZE_M(64)>;
+			status = "okay";
+
+			partitions {
+				compatible = "fixed-partitions";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				/* LittleFS with the data log; the other 48 MB are free. */
+				log_partition: partition@0 {
+					label = "log";
+					reg = <0x0 DT_SIZE_M(16)>;
+				};
+			};
+		};
 	};
 };
 
@@ -74,6 +103,13 @@
 	status = "okay";
 };
 
+/* SMIF clock: the 100 MHz FLL (path 0) / 2 = 50 MHz. */
+&clk_hf2 {
+	clocks = <&fll0>;
+	clock-div = <2>;
+	status = "okay";
+};
+
 &pinctrl {
 	p10_4_pdm_clk: p10_4_pdm_clk {
 		pinmux = <DT_CAT1_PINMUX(10, 4, HSIOM_SEL_ACT_9)>; /* audioss[0].pdm_clk */
@@ -83,6 +119,41 @@
 	p10_5_pdm_data: p10_5_pdm_data {
 		pinmux = <DT_CAT1_PINMUX(10, 5, HSIOM_SEL_ACT_9)>; /* audioss[0].pdm_data */
 		input-enable;
+	};
+
+	/* SMIF: chip select and clock are outputs, data lines go both ways. */
+	p11_2_smif_ss0: p11_2_smif_ss0 {
+		pinmux = <DT_CAT1_PINMUX(11, 2, HSIOM_SEL_ACT_5)>; /* smif.spi_select0 */
+		drive-push-pull;
+	};
+
+	p11_3_smif_d3: p11_3_smif_d3 {
+		pinmux = <DT_CAT1_PINMUX(11, 3, HSIOM_SEL_ACT_5)>; /* smif.spi_data3 */
+		drive-push-pull;
+		input-enable;
+	};
+
+	p11_4_smif_d2: p11_4_smif_d2 {
+		pinmux = <DT_CAT1_PINMUX(11, 4, HSIOM_SEL_ACT_5)>; /* smif.spi_data2 */
+		drive-push-pull;
+		input-enable;
+	};
+
+	p11_5_smif_d1: p11_5_smif_d1 {
+		pinmux = <DT_CAT1_PINMUX(11, 5, HSIOM_SEL_ACT_5)>; /* smif.spi_data1 */
+		drive-push-pull;
+		input-enable;
+	};
+
+	p11_6_smif_d0: p11_6_smif_d0 {
+		pinmux = <DT_CAT1_PINMUX(11, 6, HSIOM_SEL_ACT_5)>; /* smif.spi_data0 */
+		drive-push-pull;
+		input-enable;
+	};
+
+	p11_7_smif_clk: p11_7_smif_clk {
+		pinmux = <DT_CAT1_PINMUX(11, 7, HSIOM_SEL_ACT_5)>; /* smif.spi_clk */
+		drive-push-pull;
 	};
 };
 

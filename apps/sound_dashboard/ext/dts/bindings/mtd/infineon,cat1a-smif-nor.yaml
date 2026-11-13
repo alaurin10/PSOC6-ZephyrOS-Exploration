@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Serial NOR flash on the PSoC 6 (CAT1A) SMIF (serial memory interface),
+  exposed through the Zephyr flash API.
+
+  The driver asks the memory for its own description (SFDP, JESD216) at
+  boot: commands, address width, erase and page sizes, and whether it can
+  read over four data lines. So any SFDP-capable NOR works without a
+  hand-written memory configuration; the devicetree only says where it is.
+
+  The SMIF is clocked by clk_hf2 on PSoC 6.
+
+  Zephyr's "infineon,qspi-flash" driver needs a memory configuration from
+  the board and leaves the pins to vendor startup code, which PSoC 6 boards
+  in Zephyr don't have.
+
+  Example (CY8CPROTO-062-4343W: 64 MB S25FL512S on slave select 0 and data
+  lines 0-3):
+
+    qspi_flash: qspi-flash@40420000 {
+      compatible = "infineon,cat1a-smif-nor";
+      reg = <0x40420000 0x10000>;
+      clocks = <&clk_hf2>;
+      pinctrl-0 = <&p11_2_smif_ss0 &p11_3_smif_d3 &p11_4_smif_d2
+                   &p11_5_smif_d1 &p11_6_smif_d0 &p11_7_smif_clk>;
+      pinctrl-names = "default";
+      flash-size = <0x4000000>;
+
+      partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>;
+        #size-cells = <1>;
+
+        log_partition: partition@0 {
+          label = "log";
+          reg = <0x0 0x1000000>;
+        };
+      };
+    };
+
+compatible: "infineon,cat1a-smif-nor"
+
+include: [base.yaml, pinctrl-device.yaml]
+
+properties:
+  reg:
+    required: true
+
+  clocks:
+    required: true
+    description: The SMIF's clock, clk_hf2 on PSoC 6.
+
+  pinctrl-0:
+    required: true
+
+  pinctrl-names:
+    required: true
+
+  flash-size:
+    type: int
+    required: true
+    description: |
+      Bytes of the memory the flash API exposes. Must not exceed what the
+      memory reports through SFDP (checked at boot).
+
+  slave-select:
+    type: int
+    default: 0
+    enum: [0, 1, 2, 3]
+    description: SMIF chip select line the memory is on (spi_select0..3).
+
+  data-select:
+    type: int
+    default: 0
+    enum: [0, 1, 2, 3]
+    description: |
+      SMIF data lines the memory is on: 0 = data0-3, 1 = data2-5 (dual
+      SPI only), 2 = data4-7, 3 = data6-7 (dual SPI only).
+
+  quad-enable:
+    type: boolean
+    description: |
+      Allow the driver to set the memory's non-volatile Quad Enable bit if
+      the commands the memory reports need four data lines and the bit isn't
+      set yet. Without this property the driver uses one data line in that
+      case.

@@ -416,6 +416,37 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+// ---- Data log ----------------------------------------------------------------------
+
+const size = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`);
+
+async function loadLog() {
+  if (document.hidden) return;
+  try {
+    const info = await (await fetch('/api/logs')).json();
+    if (!info.mounted) {
+      $('log-summary').textContent = 'not available';
+      return;
+    }
+    $('log-summary').textContent =
+      `${info.files.length} file${info.files.length === 1 ? '' : 's'}, ` +
+      `${size(info.free_kb * 1024)} free of ${size(info.total_kb * 1024)}, ` +
+      `saved every ${info.sync_s} s`;
+    $('log-files').replaceChildren(...info.files.map((f) => {
+      const a = document.createElement('a');
+      a.href = `/api/log?file=${f.name}`;
+      a.download = f.name;
+      a.title = f.name === info.current ? 'Being written; downloads everything so far' : 'Download';
+      a.textContent = `${f.name} · ${size(f.size)}`;
+      a.classList.toggle('cur', f.name === info.current);
+      return a;
+    }));
+    $('log-tail').textContent = await (await fetch('/api/log?tail=12')).text();
+  } catch (e) {
+    $('log-summary').textContent = 'offline';
+  }
+}
+
 // ---- Controls ----------------------------------------------------------------------
 
 ['gain', 'smooth', 'clap'].forEach((name) => {
@@ -453,3 +484,5 @@ document.addEventListener('keydown', (e) => {
 
 connect();
 requestAnimationFrame(render);
+loadLog();
+setInterval(loadLog, 10000);

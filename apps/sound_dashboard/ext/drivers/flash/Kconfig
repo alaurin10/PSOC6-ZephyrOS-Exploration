@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config FLASH_PSOC6_SMIF
+	bool "PSoC 6 (CAT1A) SMIF serial NOR flash"
+	default y
+	depends on DT_HAS_INFINEON_CAT1A_SMIF_NOR_ENABLED
+	depends on FLASH
+	select FLASH_HAS_DRIVER_ENABLED
+	select FLASH_HAS_PAGE_LAYOUT
+	select FLASH_HAS_EXPLICIT_ERASE
+	select USE_INFINEON_SMIF
+	select PINCTRL
+	help
+	  Flash API driver for a serial NOR memory on the SMIF. The memory's
+	  geometry and commands are read from its SFDP tables at boot.

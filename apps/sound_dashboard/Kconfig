@@ -57,4 +57,31 @@ config APP_AUDIO_REC_SECONDS
 
 endmenu
 
+menu "Data log"
+
+config APP_DATALOG_SYNC_S
+	int "Seconds between syncs to flash"
+	default 10
+	range 1 300
+	help
+	  Lines are buffered in RAM and committed to the file this often; a
+	  power cut loses at most this much of the log.
+
+config APP_DATALOG_FILE_KB
+	int "Start a new log file after this many KB"
+	default 1024
+	help
+	  About 64 bytes per second are logged, so 1024 KB is roughly 4.5
+	  hours. Each file takes whole 256 KB erase blocks on the flash.
+
+config APP_DATALOG_FILES
+	int "Log files to keep"
+	default 8
+	help
+	  When a new file starts, the oldest ones are deleted to keep this many.
+	  Files x size must leave a quarter of the 16 MB log partition free
+	  for the file system (checked at build time).
+
+endmenu
+
 source "Kconfig.zephyr"
